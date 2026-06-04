@@ -1,6 +1,5 @@
 """共享测试 fixtures"""
 
-import tempfile
 from pathlib import Path
 
 import pytest

@@ -35,24 +35,28 @@ class NovareConfig:
 
         data_dir = os.environ.get("NOVARE_DATA_DIR")
         if data_dir:
-            cfg.data_dir = Path(data_dir)
+            cfg.data_dir = Path(data_dir).resolve()
 
         workspace = os.environ.get("NOVARE_WORKSPACE")
         if workspace:
-            cfg.workspace = Path(workspace)
+            cfg.workspace = Path(workspace).resolve()
 
         # 配置文件
-        path = Path(config_path) if config_path else cfg.workspace / ".novare" / "config.json"
+        path = Path(config_path).resolve() if config_path else cfg.workspace / ".novare" / "config.json"
         if path.exists():
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if "mcpServers" in data:
-                for name, srv in data["mcpServers"].items():
-                    cfg.mcp_servers[name] = McpServerConfig(
-                        command=srv["command"],
-                        args=srv.get("args", []),
-                        env=srv.get("env", {}),
-                    )
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and "mcpServers" in data:
+                    for name, srv in data["mcpServers"].items():
+                        if isinstance(srv, dict) and "command" in srv:
+                            cfg.mcp_servers[name] = McpServerConfig(
+                                command=srv["command"],
+                                args=srv.get("args", []),
+                                env=srv.get("env", {}),
+                            )
+            except (json.JSONDecodeError, OSError):
+                pass  # 配置文件损坏时使用默认值
 
         # 默认研究工具 MCP 服务器
         if not cfg.mcp_servers and (cfg.workspace / "mcp-server").exists():

@@ -1,0 +1,168 @@
+"""科研智能体 MCP Server - stdio 传输"""
+
+import asyncio
+import logging
+import os
+import sys
+
+from mcp.server import Server
+from mcp.server.stdio import stdio_server
+from mcp.types import Tool, TextContent
+
+# 日志配置（输出到 stderr，不干扰 stdio 通信）
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    stream=sys.stderr,
+)
+logger = logging.getLogger("research-server")
+
+# 数据目录
+DATA_DIR = os.environ.get("RESEARCH_DATA_DIR", "./data")
+PAPERS_DIR = os.path.join(DATA_DIR, "papers")
+DB_PATH = os.path.join(DATA_DIR, "research.db")
+KG_PATH = os.path.join(DATA_DIR, "knowledge_graph.json")
+
+# 确保目录存在
+os.makedirs(PAPERS_DIR, exist_ok=True)
+
+server = Server("research")
+
+
+# ── 工具注册 ──────────────────────────────────────────────────────────────
+
+@server.list_tools()
+async def list_tools() -> list[Tool]:
+    return [
+        Tool(
+            name="echo",
+            description="Echo 回显工具，用于测试 MCP 连接是否正常。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "要回显的消息",
+                    }
+                },
+                "required": ["message"],
+            },
+        ),
+        Tool(
+            name="paper_search",
+            description="搜索学术论文。同时查询 Semantic Scholar 和 arXiv，返回论文列表（标题、作者、摘要、引用数、PDF 链接）。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "搜索关键词或自然语言描述"},
+                    "year_from": {"type": "integer", "description": "起始年份（可选）"},
+                    "year_to": {"type": "integer", "description": "结束年份（可选）"},
+                    "limit": {"type": "integer", "description": "返回数量，默认 10，最大 20"},
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="paper_parse",
+            description="解析论文 PDF，提取结构化内容（各章节文本、参考文献），自动建立 RAG 索引。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "paper_id": {"type": "string", "description": "论文 ID（Semantic Scholar ID 或 arXiv ID）"},
+                    "pdf_url": {"type": "string", "description": "直接提供 PDF URL（与 paper_id 二选一）"},
+                },
+            },
+        ),
+        Tool(
+            name="rag_query",
+            description="在已解析的论文库中进行语义检索，返回最相关的文本片段。需要先用 paper_parse 解析论文。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "自然语言问题"},
+                    "top_k": {"type": "integer", "description": "返回结果数量，默认 5"},
+                },
+                "required": ["question"],
+            },
+        ),
+        Tool(
+            name="knowledge_graph",
+            description="查询或更新论文知识图谱。支持添加论文/概念/关系，查询子图，查找路径。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["add_paper", "add_concept", "add_relation", "query", "find_path", "stats"],
+                    },
+                    "paper_id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "subject": {"type": "string"},
+                    "predicate": {"type": "string"},
+                    "object": {"type": "string"},
+                    "target": {"type": "string"},
+                },
+                "required": ["action"],
+            },
+        ),
+        Tool(
+            name="code_execute",
+            description="在本地执行 Python 代码。适用于数据分析、统计计算、可视化。预装 numpy、pandas、matplotlib、scipy。",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "要执行的 Python 代码"},
+                    "timeout": {"type": "integer", "description": "超时秒数，默认 30"},
+                },
+                "required": ["code"],
+            },
+        ),
+    ]
+
+
+@server.call_tool()
+async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    logger.info("Tool call: %s(%s)", name, arguments)
+
+    if name == "echo":
+        return [TextContent(type="text", text=arguments.get("message", ""))]
+
+    if name == "paper_search":
+        from tools.paper_search import handle_paper_search
+        result = await handle_paper_search(arguments)
+        return [TextContent(type="text", text=result)]
+
+    if name == "paper_parse":
+        from tools.paper_parse import handle_paper_parse
+        result = await handle_paper_parse(arguments)
+        return [TextContent(type="text", text=result)]
+
+    if name == "rag_query":
+        from tools.rag_query import handle_rag_query
+        result = await handle_rag_query(arguments)
+        return [TextContent(type="text", text=result)]
+
+    if name == "knowledge_graph":
+        from tools.knowledge_graph import handle_knowledge_graph
+        result = await handle_knowledge_graph(arguments)
+        return [TextContent(type="text", text=result)]
+
+    if name == "code_execute":
+        from tools.code_execute import handle_code_execute
+        result = await handle_code_execute(arguments)
+        return [TextContent(type="text", text=result)]
+
+    return [TextContent(type="text", text=f"Unknown tool: {name}")]
+
+
+# ── 入口 ──────────────────────────────────────────────────────────────────
+
+async def main():
+    logger.info("Research Agent MCP Server starting (data_dir=%s)", DATA_DIR)
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(read_stream, write_stream)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
