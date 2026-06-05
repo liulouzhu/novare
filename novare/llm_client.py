@@ -34,7 +34,7 @@ def parse_chat_response(raw: dict) -> LLMResponse:
     content = message.get("content") or ""
     tool_calls = []
 
-    for tc in message.get("tool_calls", []):
+    for tc in (message.get("tool_calls") or []):
         func = tc["function"]
         tool_calls.append(ToolCall(
             id=tc["id"],

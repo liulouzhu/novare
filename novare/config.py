@@ -30,10 +30,8 @@ class NovareConfig:
         """从 .env 文件、环境变量和配置文件加载配置"""
         cfg = cls()
 
-        # 加载 .env 文件（项目根目录）
-        env_path = cfg.workspace / ".env"
-        if env_path.exists():
-            load_dotenv(env_path)
+        # 加载 .env 文件（当前工作目录）
+        load_dotenv(Path.cwd() / ".env")
 
         # 环境变量覆盖
         cfg.api_key = os.environ.get("NOVARE_API_KEY", cfg.api_key)
