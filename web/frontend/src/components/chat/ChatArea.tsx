@@ -4,13 +4,15 @@ import { useEffect, useRef } from 'react'
 import { useChat } from '@/hooks/useChat'
 import { MessageBubble } from './MessageBubble'
 import { InputBox } from './InputBox'
-import { Wifi, WifiOff, Loader2 } from 'lucide-react'
+import { Wifi, WifiOff, Loader2, PanelRightClose, PanelRightOpen } from 'lucide-react'
 
 interface Props {
   sessionId: string
+  panelOpen: boolean
+  onTogglePanel: () => void
 }
 
-export function ChatArea({ sessionId }: Props) {
+export function ChatArea({ sessionId, panelOpen, onTogglePanel }: Props) {
   const { messages, isStreaming, connected, send } = useChat(sessionId)
   const scrollRef = useRef<HTMLDivElement>(null)
   const autoScrollRef = useRef(true)
@@ -39,9 +41,22 @@ export function ChatArea({ sessionId }: Props) {
         <div className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
           对话
         </div>
-        <div className="flex items-center gap-1.5 text-xs" style={{ color: connected ? 'var(--success)' : 'var(--error)' }}>
-          {connected ? <Wifi size={12} /> : <WifiOff size={12} />}
-          <span>{connected ? '已连接' : '未连接'}</span>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5 text-xs" style={{ color: connected ? 'var(--success)' : 'var(--error)' }}>
+            {connected ? <Wifi size={12} /> : <WifiOff size={12} />}
+            <span>{connected ? '已连接' : '未连接'}</span>
+          </div>
+          <button
+            onClick={onTogglePanel}
+            className="p-1.5 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+            title={panelOpen ? '隐藏论文库' : '显示论文库'}
+          >
+            {panelOpen ? (
+              <PanelRightClose size={16} style={{ color: 'var(--text-secondary)' }} />
+            ) : (
+              <PanelRightOpen size={16} style={{ color: 'var(--text-secondary)' }} />
+            )}
+          </button>
         </div>
       </div>
 
