@@ -16,7 +16,7 @@ S2_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 S2_FIELDS = "title,authors,abstract,year,externalIds,citationCount,openAccessPdf"
 
 # arXiv API
-ARXIV_API = "http://export.arxiv.org/api/query"
+ARXIV_API = "https://export.arxiv.org/api/query"
 
 
 async def _search_semantic_scholar(
@@ -36,7 +36,7 @@ async def _search_semantic_scholar(
         params["year"] = year_range
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, headers={"User-Agent": "Novare-ResearchAgent/0.1"}) as client:
             resp = await client.get(S2_API, params=params)
             resp.raise_for_status()
             data = resp.json()
@@ -108,7 +108,7 @@ async def _search_arxiv(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, headers={"User-Agent": "Novare-ResearchAgent/0.1"}) as client:
             resp = await client.get(ARXIV_API, params=params)
             resp.raise_for_status()
             xml_text = resp.text
