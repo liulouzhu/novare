@@ -5,7 +5,7 @@ import logging
 import os
 import sys
 
-from mcp.server import Server
+from mcp.server import Server, InitializationOptions, NotificationOptions
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
@@ -161,7 +161,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 async def main():
     logger.info("Research Agent MCP Server starting (data_dir=%s)", DATA_DIR)
     async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream)
+        await server.run(
+            read_stream, write_stream,
+            InitializationOptions(
+                server_name="research",
+                server_version="0.1.0",
+                capabilities=server.get_capabilities(
+                    NotificationOptions(),
+                    {},
+                ),
+            ),
+        )
 
 
 if __name__ == "__main__":
