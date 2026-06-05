@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
@@ -33,10 +34,14 @@ class AgentLoop:
         session,
         user_input: str,
         on_text: Callable[[str], None] | None = None,
+        on_tool: Callable[[str, str, dict, str | None, float | None], None] | None = None,
     ) -> str:
         """执行一轮对话：用户输入 → LLM（流式） → 工具循环 → 最终回答
 
         on_text: 可选回调，流式输出时逐 chunk 调用，用于实时打印文本。
+        on_tool: 可选回调，工具状态事件。
+                 签名：(event, name, arguments, result_preview, duration_sec)
+                 event: "start" | "end" | "error"
         """
         session.add_user_message(user_input)
 
@@ -65,11 +70,18 @@ class AgentLoop:
             # 执行每个工具调用
             for tc in response.tool_calls:
                 logger.info("Tool call: %s(%s)", tc.name, tc.arguments)
-                try:
-                    result = await self.tool_registry.execute(tc.name, tc.arguments)
-                except Exception as e:
-                    logger.exception("Tool error: %s", tc.name)
-                    result = f"Error: {e}"
+                if on_tool:
+                    on_tool("start", tc.name, tc.arguments, None, None)
+                t0 = time.monotonic()
+                result = await self.tool_registry.execute(tc.name, tc.arguments)
+                elapsed = time.monotonic() - t0
+                # ToolRegistry 内部 catch 异常返回 "Error: ..." 字符串
+                if result.startswith("Error"):
+                    if on_tool:
+                        on_tool("error", tc.name, tc.arguments, result, elapsed)
+                else:
+                    if on_tool:
+                        on_tool("end", tc.name, tc.arguments, result[:200], elapsed)
                 session.add_tool_result(tc.id, result)
                 logger.debug("Tool result: %s → %d chars", tc.name, len(result))
 

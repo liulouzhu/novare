@@ -15,6 +15,64 @@ from novare.agent_loop import AgentLoop
 from novare.skill import Skill, discover_skills
 
 
+# ── 工具状态显示 ────────────────────────────────────────────────────────────
+
+def _format_tool_args(args: dict) -> str:
+    """精简展示工具参数：取前 2 个 key，string 截断到 40 字符"""
+    items = list(args.items())[:2]
+    parts = []
+    for k, v in items:
+        val = str(v)
+        if len(val) > 40:
+            val = val[:37] + "..."
+        parts.append(f"{k}={val!r}")
+    return ", ".join(parts)
+
+
+def _summarize_result(name: str, result: str | None) -> str:
+    """按工具类型生成结果摘要"""
+    if not result:
+        return "完成"
+    if name == "paper_search":
+        # 尝试提取论文数量
+        import re
+        m = re.search(r"找到\s*(\d+)\s*篇|(\d+)\s*results?|共\s*(\d+)", result, re.IGNORECASE)
+        if m:
+            n = next(g for g in m.groups() if g)
+            return f"{n} 条结果"
+        return "搜索完成"
+    if name == "paper_parse":
+        return "解析完成"
+    if name == "rag_query":
+        import re
+        m = re.search(r"(\d+)\s*(?:条|个|results?|matches)", result, re.IGNORECASE)
+        if m:
+            return f"{m.group(1)} 条匹配"
+        return "检索完成"
+    if name == "knowledge_graph":
+        return "图谱操作完成"
+    if name == "code_execute":
+        return "执行完成"
+    return "完成"
+
+
+def _make_tool_handler():
+    """返回工具状态回调函数"""
+    def handler(event: str, name: str, args: dict, result: str | None, elapsed: float | None):
+        if event == "start":
+            arg_str = _format_tool_args(args)
+            print(f"  ⚡ {name}({arg_str})")
+        elif event == "end":
+            summary = _summarize_result(name, result)
+            time_str = f"{elapsed:.1f}s" if elapsed else ""
+            print(f"  ✅ {name} · {summary} · {time_str}")
+        elif event == "error":
+            time_str = f"{elapsed:.1f}s" if elapsed else ""
+            err_msg = (result[:60] + "...") if result and len(result) > 60 else (result or "unknown")
+            print(f"  ❌ {name} · {err_msg} · {time_str}")
+    return handler
+
+
 async def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -157,7 +215,8 @@ async def main():
             # 正常对话
             try:
                 print()  # 换行
-                result = await agent.run_turn(session, user_input, on_text=lambda t: print(t, end="", flush=True))
+                on_tool = _make_tool_handler()
+                result = await agent.run_turn(session, user_input, on_text=lambda t: print(t, end="", flush=True), on_tool=on_tool)
                 print()  # 流式结束后换行
                 session.save()
             except KeyboardInterrupt:
@@ -209,7 +268,8 @@ async def _invoke_skill(
     print(f"[skill: {name}]")
     try:
         print()
-        result = await agent.run_turn(session, prompt, on_text=lambda t: print(t, end="", flush=True))
+        on_tool = _make_tool_handler()
+        result = await agent.run_turn(session, prompt, on_text=lambda t: print(t, end="", flush=True), on_tool=on_tool)
         print()
         session.save()
     except KeyboardInterrupt:
