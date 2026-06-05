@@ -21,14 +21,17 @@ export function InputBox({ onSend, disabled }: Props) {
   const [uploading, setUploading] = useState(false)
   const [showSkills, setShowSkills] = useState(false)
   const [skillFilter, setSkillFilter] = useState('')
+  const [selectedSkillIdx, setSelectedSkillIdx] = useState(0)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const skillListRef = useRef<HTMLDivElement>(null)
 
   // 检测 "/" 触发 Skill 列表
   useEffect(() => {
     if (text === '/' || (text.startsWith('/') && !text.includes(' ') && text.length < 20)) {
       setShowSkills(true)
-      setSkillFilter(text.slice(1)) // "/" 后面的字符作为过滤
+      setSkillFilter(text.slice(1))
+      setSelectedSkillIdx(0)
     } else {
       setShowSkills(false)
     }
@@ -37,6 +40,13 @@ export function InputBox({ onSend, disabled }: Props) {
   const filteredSkills = skillFilter
     ? SKILLS.filter((s) => s.name.includes(skillFilter) || s.label.includes(skillFilter))
     : SKILLS
+
+  // 确保选中项在有效范围内
+  useEffect(() => {
+    if (selectedSkillIdx >= filteredSkills.length) {
+      setSelectedSkillIdx(Math.max(0, filteredSkills.length - 1))
+    }
+  }, [filteredSkills.length, selectedSkillIdx])
 
   const selectSkill = (skillName: string) => {
     setText(`/${skillName} `)
@@ -62,6 +72,30 @@ export function InputBox({ onSend, disabled }: Props) {
   }, [text, disabled, attachments, onSend])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // Skill 列表打开时的键盘导航
+    if (showSkills && filteredSkills.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSelectedSkillIdx((prev) => (prev + 1) % filteredSkills.length)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSelectedSkillIdx((prev) => (prev - 1 + filteredSkills.length) % filteredSkills.length)
+        return
+      }
+      if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault()
+        selectSkill(filteredSkills[selectedSkillIdx].name)
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setShowSkills(false)
+        return
+      }
+    }
+
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault()
       handleSend()
@@ -144,17 +178,22 @@ export function InputBox({ onSend, disabled }: Props) {
         {/* Skill 下拉列表 */}
         {showSkills && filteredSkills.length > 0 && (
           <div
+            ref={skillListRef}
             className="mb-2 rounded-lg border overflow-hidden shadow-sm"
             style={{ borderColor: 'var(--border-color)', backgroundColor: 'var(--bg-primary)' }}
           >
             <div className="px-3 py-1.5 text-xs font-medium border-b" style={{ borderColor: 'var(--border-color)', color: 'var(--text-tertiary)' }}>
-              Skill 命令
+              Skill 命令 <span className="font-normal">↑↓ 选择 · Enter 确认 · Esc 关闭</span>
             </div>
-            {filteredSkills.map((skill) => (
+            {filteredSkills.map((skill, idx) => (
               <button
                 key={skill.name}
                 onClick={() => selectSkill(skill.name)}
-                className="w-full flex items-center gap-3 px-3 py-2 text-sm text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+                onMouseEnter={() => setSelectedSkillIdx(idx)}
+                className="w-full flex items-center gap-3 px-3 py-2 text-sm text-left transition-colors"
+                style={{
+                  backgroundColor: idx === selectedSkillIdx ? 'var(--bg-tertiary)' : 'transparent',
+                }}
               >
                 <span style={{ color: 'var(--accent)' }}>{skill.icon}</span>
                 <div className="min-w-0 flex-1">
