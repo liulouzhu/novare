@@ -37,7 +37,7 @@ export function SessionSidebar() {
 
   return (
     <div
-      className="w-60 flex flex-col border-r shrink-0 relative"
+      className="w-60 flex flex-col border-r shrink-0"
       style={{ borderColor: 'var(--border-color)', backgroundColor: 'var(--bg-secondary)' }}
     >
       {/* 头部 */}
@@ -127,10 +127,11 @@ export function SessionSidebar() {
 
       {/* 删除确认弹窗 */}
       {deleteTarget && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center" style={{ backgroundColor: 'rgba(0,0,0,0.4)' }}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ backgroundColor: 'rgba(0,0,0,0.4)' }} onClick={() => setDeleteTarget(null)}>
           <div
             className="w-72 rounded-xl border shadow-xl p-5"
             style={{ borderColor: 'var(--border-color)', backgroundColor: 'var(--bg-primary)' }}
+            onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-3">
               <div className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
