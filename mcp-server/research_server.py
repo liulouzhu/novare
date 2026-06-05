@@ -15,6 +15,9 @@ from mcp.server import Server, InitializationOptions, NotificationOptions
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
+# 预加载重型依赖（避免在 handler 中首次 import 阻塞事件循环）
+import numpy  # noqa: F401
+
 # 日志配置（输出到 stderr，不干扰 stdio 通信）
 logging.basicConfig(
     level=logging.INFO,

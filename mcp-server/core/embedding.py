@@ -3,7 +3,6 @@
 import logging
 import os
 
-import anyio
 import httpx
 
 logger = logging.getLogger("research-server.embedding")
@@ -103,76 +102,99 @@ def get_embedding_dim() -> int:
         return embedder.dim
 
 
-def embed_text(text: str) -> list[float]:
-    """对单个文本进行向量化（同步）"""
+# ── 异步版本（MCP 工具调用）─────────────────────────────────────────────
+
+async def _bailian_embed_async(config: dict, texts: list[str]) -> list[list[float]]:
+    """异步调用百炼 embedding API"""
+    url = f"{config['base_url']}/embeddings"
+    headers = {
+        "Authorization": f"Bearer {config['api_key']}",
+        "Content-Type": "application/json",
+    }
+    results = []
+    batch_size = 25
+    async with httpx.AsyncClient(timeout=60) as client:
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            body = {
+                "model": config["model"],
+                "input": batch,
+                "dimensions": config["dim"],
+            }
+            resp = await client.post(url, json=body, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            sorted_data = sorted(data["data"], key=lambda x: x["index"])
+            results.extend([item["embedding"] for item in sorted_data])
+    return results
+
+
+async def embed_text_async(text: str) -> list[float]:
+    """异步单条向量化"""
     embedder_type, embedder = get_embedder()
-
     if embedder_type == "bailian":
-        url = f"{embedder['base_url']}/embeddings"
-        headers = {
-            "Authorization": f"Bearer {embedder['api_key']}",
-            "Content-Type": "application/json",
-        }
-        body = {
-            "model": embedder["model"],
-            "input": text,
-            "dimensions": embedder["dim"],
-        }
-        resp = httpx.post(url, json=body, headers=headers, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["data"][0]["embedding"]
-
+        return (await _bailian_embed_async(embedder, [text]))[0]
     elif embedder_type == "local":
-        vec = embedder.encode(text, normalize_embeddings=True)
-        return vec.tolist()
-
+        return embedder.encode(text, normalize_embeddings=True).tolist()
     else:
         return embedder.encode(text)
 
 
-async def embed_text_async(text: str) -> list[float]:
-    """对单个文本进行向量化（异步，不阻塞事件循环）"""
-    return await anyio.to_thread.run_sync(embed_text, text)
-
-
-def embed_batch(texts: list[str]) -> list[list[float]]:
-    """批量向量化（同步）"""
+async def embed_batch_async(texts: list[str]) -> list[list[float]]:
+    """异步批量向量化"""
     if not texts:
         return []
-
     embedder_type, embedder = get_embedder()
+    if embedder_type == "bailian":
+        return await _bailian_embed_async(embedder, texts)
+    elif embedder_type == "local":
+        vecs = embedder.encode(texts, normalize_embeddings=True, batch_size=64)
+        return [v.tolist() for v in vecs]
+    else:
+        return embedder.encode_batch(texts)
 
+
+# ── 同步版本（非 MCP 场景）─────────────────────────────────────────────
+
+def embed_text(text: str) -> list[float]:
+    """同步单条向量化"""
+    embedder_type, embedder = get_embedder()
     if embedder_type == "bailian":
         url = f"{embedder['base_url']}/embeddings"
         headers = {
             "Authorization": f"Bearer {embedder['api_key']}",
             "Content-Type": "application/json",
         }
+        body = {"model": embedder["model"], "input": text, "dimensions": embedder["dim"]}
+        resp = httpx.post(url, json=body, headers=headers, timeout=30)
+        resp.raise_for_status()
+        return resp.json()["data"][0]["embedding"]
+    elif embedder_type == "local":
+        return embedder.encode(text, normalize_embeddings=True).tolist()
+    else:
+        return embedder.encode(text)
+
+
+def embed_batch(texts: list[str]) -> list[list[float]]:
+    """同步批量向量化"""
+    if not texts:
+        return []
+    embedder_type, embedder = get_embedder()
+    if embedder_type == "bailian":
+        url = f"{embedder['base_url']}/embeddings"
+        headers = {"Authorization": f"Bearer {embedder['api_key']}", "Content-Type": "application/json"}
         results = []
-        batch_size = 25
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            body = {
-                "model": embedder["model"],
-                "input": batch,
-                "dimensions": embedder["dim"],
-            }
+        for i in range(0, len(texts), 25):
+            batch = texts[i:i + 25]
+            body = {"model": embedder["model"], "input": batch, "dimensions": embedder["dim"]}
             resp = httpx.post(url, json=body, headers=headers, timeout=60)
             resp.raise_for_status()
             data = resp.json()
             sorted_data = sorted(data["data"], key=lambda x: x["index"])
             results.extend([item["embedding"] for item in sorted_data])
         return results
-
     elif embedder_type == "local":
         vecs = embedder.encode(texts, normalize_embeddings=True, batch_size=64)
         return [v.tolist() for v in vecs]
-
     else:
         return embedder.encode_batch(texts)
-
-
-async def embed_batch_async(texts: list[str]) -> list[list[float]]:
-    """批量向量化（异步，不阻塞事件循环）"""
-    return await anyio.to_thread.run_sync(embed_batch, texts)

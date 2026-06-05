@@ -44,7 +44,6 @@ async def handle_rag_query(args: dict) -> str:
     # 计算 cosine similarity
     results = []
     for emb in all_embeddings:
-        # 确保维度匹配
         if len(emb["vec"]) != len(query_vec):
             continue
         score = _cosine_similarity(query_vec, emb["vec"])
@@ -57,14 +56,12 @@ async def handle_rag_query(args: dict) -> str:
             "title": emb["title"],
         })
 
-    # 按相似度排序
     results.sort(key=lambda x: x["score"], reverse=True)
     top_results = results[:top_k]
 
     if not top_results:
         return "未找到相关内容。请确保已解析的论文与查询主题相关。"
 
-    # 格式化输出
     lines = [f"语义检索结果（Top {len(top_results)}）：\n"]
     for i, r in enumerate(top_results, 1):
         snippet = r["text"][:480].replace("\n", " ")
@@ -73,7 +70,6 @@ async def handle_rag_query(args: dict) -> str:
         lines.append(f"   片段: {snippet}{'...' if len(r['text']) > 480 else ''}")
         lines.append("")
 
-    # 统计信息
     unique_papers = len(set(r["paper_id"] for r in top_results))
     lines.append(f"---")
     lines.append(f"检索自 {len(all_embeddings)} 个文本分块，涉及 {unique_papers} 篇论文。")
