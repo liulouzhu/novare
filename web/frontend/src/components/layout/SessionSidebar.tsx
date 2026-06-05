@@ -1,13 +1,15 @@
 /** 左侧会话列表 */
 
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useSessionStore } from '@/stores/sessionStore'
-import { useChatStore } from '@/stores/chatStore'
+import { useThemeStore } from '@/stores/themeStore'
 import { cn } from '@/lib/utils'
-import { Plus, Trash2, MessageSquare, Loader2 } from 'lucide-react'
+import { Plus, Trash2, MessageSquare, Loader2, Sun, Moon, X } from 'lucide-react'
 
 export function SessionSidebar() {
   const { sessions, currentId, loading, loadSessions, createSession, switchSession, deleteSession } = useSessionStore()
+  const { theme, resolved, setTheme } = useThemeStore()
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
 
   useEffect(() => {
     loadSessions()
@@ -17,16 +19,25 @@ export function SessionSidebar() {
     await createSession()
   }
 
-  const handleDelete = async (e: React.MouseEvent, id: string) => {
+  const handleDeleteClick = (e: React.MouseEvent, id: string) => {
     e.stopPropagation()
-    if (confirm('确定删除此会话？')) {
-      await deleteSession(id)
+    setDeleteTarget(id)
+  }
+
+  const handleConfirmDelete = async () => {
+    if (deleteTarget) {
+      await deleteSession(deleteTarget)
+      setDeleteTarget(null)
     }
+  }
+
+  const toggleTheme = () => {
+    setTheme(resolved === 'dark' ? 'light' : 'dark')
   }
 
   return (
     <div
-      className="w-60 flex flex-col border-r shrink-0"
+      className="w-60 flex flex-col border-r shrink-0 relative"
       style={{ borderColor: 'var(--border-color)', backgroundColor: 'var(--bg-secondary)' }}
     >
       {/* 头部 */}
@@ -34,13 +45,26 @@ export function SessionSidebar() {
         <h1 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
           🔬 Novare
         </h1>
-        <button
-          onClick={handleNew}
-          className="p-1.5 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
-          title="新建会话"
-        >
-          <Plus size={16} style={{ color: 'var(--text-secondary)' }} />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={toggleTheme}
+            className="p-1.5 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+            title={resolved === 'dark' ? '切换浅色主题' : '切换深色主题'}
+          >
+            {resolved === 'dark' ? (
+              <Sun size={15} style={{ color: 'var(--text-secondary)' }} />
+            ) : (
+              <Moon size={15} style={{ color: 'var(--text-secondary)' }} />
+            )}
+          </button>
+          <button
+            onClick={handleNew}
+            className="p-1.5 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+            title="新建会话"
+          >
+            <Plus size={16} style={{ color: 'var(--text-secondary)' }} />
+          </button>
+        </div>
       </div>
 
       {/* 会话列表 */}
@@ -65,7 +89,7 @@ export function SessionSidebar() {
             <MessageSquare size={14} className="shrink-0 opacity-50" />
             <span className="truncate flex-1">{s.title || s.session_id}</span>
             <button
-              onClick={(e) => handleDelete(e, s.session_id)}
+              onClick={(e) => handleDeleteClick(e, s.session_id)}
               className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/30 transition-opacity"
             >
               <Trash2 size={12} style={{ color: 'var(--error)' }} />
@@ -100,6 +124,47 @@ export function SessionSidebar() {
           ))}
         </div>
       </div>
+
+      {/* 删除确认弹窗 */}
+      {deleteTarget && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center" style={{ backgroundColor: 'rgba(0,0,0,0.4)' }}>
+          <div
+            className="w-72 rounded-xl border shadow-xl p-5"
+            style={{ borderColor: 'var(--border-color)', backgroundColor: 'var(--bg-primary)' }}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <div className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+                删除会话
+              </div>
+              <button
+                onClick={() => setDeleteTarget(null)}
+                className="p-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+              >
+                <X size={14} style={{ color: 'var(--text-tertiary)' }} />
+              </button>
+            </div>
+            <p className="text-sm mb-5" style={{ color: 'var(--text-secondary)' }}>
+              确定要删除此会话吗？删除后不可恢复。
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setDeleteTarget(null)}
+                className="px-3 py-1.5 text-sm rounded-lg border transition-colors hover:bg-gray-50 dark:hover:bg-gray-800"
+                style={{ borderColor: 'var(--border-color)', color: 'var(--text-primary)' }}
+              >
+                取消
+              </button>
+              <button
+                onClick={handleConfirmDelete}
+                className="px-3 py-1.5 text-sm rounded-lg text-white transition-colors hover:opacity-90"
+                style={{ backgroundColor: 'var(--error)' }}
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
