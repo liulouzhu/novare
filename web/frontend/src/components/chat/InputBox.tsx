@@ -96,7 +96,8 @@ export function InputBox({ onSend, disabled }: Props) {
       }
     }
 
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    // Enter 发送，Shift+Enter 换行
+    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
       e.preventDefault()
       handleSend()
     }
@@ -251,7 +252,7 @@ export function InputBox({ onSend, disabled }: Props) {
             value={text}
             onChange={handleInput}
             onKeyDown={handleKeyDown}
-            placeholder={disabled ? 'Agent 正在工作中...' : '输入研究问题... (Ctrl+Enter 发送)'}
+            placeholder={disabled ? 'Agent 正在工作中...' : '输入研究问题... (Enter 发送，Shift+Enter 换行)'}
             disabled={disabled}
             rows={1}
             className="flex-1 resize-none bg-transparent outline-none text-sm leading-6 max-h-[200px] disabled:opacity-50"
@@ -267,14 +268,14 @@ export function InputBox({ onSend, disabled }: Props) {
               backgroundColor: text.trim() && !disabled ? 'var(--accent)' : 'transparent',
               color: text.trim() && !disabled ? 'white' : 'var(--text-tertiary)',
             }}
-            title="发送 (Ctrl+Enter)"
+            title="发送 (Enter)"
           >
             <Send size={16} />
           </button>
         </div>
 
         <div className="text-xs mt-1.5 text-center" style={{ color: 'var(--text-tertiary)' }}>
-          Ctrl+Enter 发送 · 支持拖拽上传文件 · 输入 / 使用 Skill
+          Enter 发送 · Shift+Enter 换行 · 支持拖拽上传文件 · 输入 / 使用 Skill
         </div>
       </div>
     </div>
