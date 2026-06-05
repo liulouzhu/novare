@@ -1,4 +1,4 @@
-"""向量化模块 - 百炼 text-embedding-v4 优先，OpenAI fallback，本地 fallback"""
+"""向量化模块 - 百炼 text-embedding-v4 优先，本地 fallback"""
 
 import logging
 import os
@@ -28,21 +28,6 @@ def _get_bailian_embedder():
         "model": model,
         "dim": 1024,
     })
-
-
-def _get_openai_embedder():
-    """OpenAI text-embedding-3-small"""
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        return None
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-        logger.info("Using OpenAI text-embedding-3-small")
-        return ("openai", client)
-    except ImportError:
-        logger.warning("openai package not installed, skipping OpenAI embedder")
-        return None
 
 
 def _get_local_embedder():
@@ -82,15 +67,10 @@ def _get_numpy_fallback():
 
 
 def _init_embedder():
-    """初始化嵌入模型，优先 百炼 → OpenAI → 本地 → numpy fallback"""
+    """初始化嵌入模型，优先 百炼 → 本地 → numpy fallback"""
     global _embedder, _embedder_type
 
     result = _get_bailian_embedder()
-    if result:
-        _embedder_type, _embedder = result
-        return
-
-    result = _get_openai_embedder()
     if result:
         _embedder_type, _embedder = result
         return
@@ -116,35 +96,10 @@ def get_embedding_dim() -> int:
     embedder_type, embedder = get_embedder()
     if embedder_type == "bailian":
         return embedder["dim"]
-    elif embedder_type == "openai":
-        return 1536
     elif embedder_type == "local":
         return 384
     else:
         return embedder.dim
-
-
-async def _call_bailian_api(config: dict, texts: list[str]) -> list[list[float]]:
-    """调用百炼 embedding API"""
-    url = f"{config['base_url']}/embeddings"
-    headers = {
-        "Authorization": f"Bearer {config['api_key']}",
-        "Content-Type": "application/json",
-    }
-    body = {
-        "model": config["model"],
-        "input": texts,
-        "dimensions": config["dim"],
-    }
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(url, json=body, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-
-    # 按 index 排序
-    sorted_data = sorted(data["data"], key=lambda x: x["index"])
-    return [item["embedding"] for item in sorted_data]
 
 
 def embed_text(text: str) -> list[float]:
@@ -152,8 +107,6 @@ def embed_text(text: str) -> list[float]:
     embedder_type, embedder = get_embedder()
 
     if embedder_type == "bailian":
-        # 同步调用用 httpx
-        import httpx as hx
         url = f"{embedder['base_url']}/embeddings"
         headers = {
             "Authorization": f"Bearer {embedder['api_key']}",
@@ -164,17 +117,10 @@ def embed_text(text: str) -> list[float]:
             "input": text,
             "dimensions": embedder["dim"],
         }
-        resp = hx.post(url, json=body, headers=headers, timeout=30)
+        resp = httpx.post(url, json=body, headers=headers, timeout=30)
         resp.raise_for_status()
         data = resp.json()
         return data["data"][0]["embedding"]
-
-    elif embedder_type == "openai":
-        resp = embedder.embeddings.create(
-            model="text-embedding-3-small",
-            input=text,
-        )
-        return resp.data[0].embedding
 
     elif embedder_type == "local":
         vec = embedder.encode(text, normalize_embeddings=True)
@@ -192,13 +138,11 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
     embedder_type, embedder = get_embedder()
 
     if embedder_type == "bailian":
-        import httpx as hx
         url = f"{embedder['base_url']}/embeddings"
         headers = {
             "Authorization": f"Bearer {embedder['api_key']}",
             "Content-Type": "application/json",
         }
-        # 百炼支持批量，分批处理
         results = []
         batch_size = 25
         for i in range(0, len(texts), batch_size):
@@ -208,24 +152,11 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
                 "input": batch,
                 "dimensions": embedder["dim"],
             }
-            resp = hx.post(url, json=body, headers=headers, timeout=60)
+            resp = httpx.post(url, json=body, headers=headers, timeout=60)
             resp.raise_for_status()
             data = resp.json()
             sorted_data = sorted(data["data"], key=lambda x: x["index"])
             results.extend([item["embedding"] for item in sorted_data])
-        return results
-
-    elif embedder_type == "openai":
-        results = []
-        batch_size = 100
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            resp = embedder.embeddings.create(
-                model="text-embedding-3-small",
-                input=batch,
-            )
-            for item in resp.data:
-                results.append(item.embedding)
         return results
 
     elif embedder_type == "local":
