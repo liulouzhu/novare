@@ -74,7 +74,7 @@ class Session:
         sessions_dir = workspace / ".novare" / "sessions"
         if not sessions_dir.exists():
             return []
-        return [p.stem for p in sorted(sessions_dir.glob("*.jsonl"))]
+        return [p.stem for p in sorted(sessions_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)]
 
     def delete(self):
         if self._path.exists():
