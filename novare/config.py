@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 
 @dataclass
 class McpServerConfig:
@@ -25,8 +27,13 @@ class NovareConfig:
 
     @classmethod
     def load(cls, config_path: str | Path | None = None) -> "NovareConfig":
-        """从环境变量和配置文件加载配置"""
+        """从 .env 文件、环境变量和配置文件加载配置"""
         cfg = cls()
+
+        # 加载 .env 文件（项目根目录）
+        env_path = cfg.workspace / ".env"
+        if env_path.exists():
+            load_dotenv(env_path)
 
         # 环境变量覆盖
         cfg.api_key = os.environ.get("NOVARE_API_KEY", cfg.api_key)
