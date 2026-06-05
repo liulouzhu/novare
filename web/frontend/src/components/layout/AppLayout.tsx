@@ -1,25 +1,28 @@
 /** 三栏布局容器 */
 
 import { useState } from 'react'
-import { SessionSidebar } from './SessionSidebar'
+import { SessionSidebar, type PageKey } from './SessionSidebar'
 import { ReferencePanel } from './ReferencePanel'
 import { ChatArea } from '../chat/ChatArea'
-import { useSessionStore } from '@/stores/sessionStore'
 import { WelcomeScreen } from '../chat/WelcomeScreen'
-import { PanelRightClose, PanelRightOpen } from 'lucide-react'
+import { PaperLibraryPage } from '../pages/PaperLibraryPage'
+import { KnowledgeGraphPage } from '../pages/KnowledgeGraphPage'
+import { useSessionStore } from '@/stores/sessionStore'
 
 export function AppLayout() {
   const currentId = useSessionStore((s) => s.currentId)
+  const [activePage, setActivePage] = useState<PageKey>('chat')
   const [showPanel, setShowPanel] = useState(true)
 
-  return (
-    <div className="flex h-screen overflow-hidden" style={{ backgroundColor: 'var(--bg-primary)' }}>
-      {/* 左侧：会话列表 */}
-      <SessionSidebar />
-
-      {/* 中间：对话区域 */}
-      <div className="flex-1 flex flex-col min-w-0">
-        {currentId ? (
+  const renderMainContent = () => {
+    switch (activePage) {
+      case 'papers':
+        return <PaperLibraryPage />
+      case 'graph':
+        return <KnowledgeGraphPage />
+      case 'chat':
+      default:
+        return currentId ? (
           <ChatArea
             sessionId={currentId}
             panelOpen={showPanel}
@@ -27,11 +30,24 @@ export function AppLayout() {
           />
         ) : (
           <WelcomeScreen />
-        )}
+        )
+    }
+  }
+
+  return (
+    <div className="flex h-screen overflow-hidden" style={{ backgroundColor: 'var(--bg-primary)' }}>
+      {/* 左侧导航栏 */}
+      <SessionSidebar activePage={activePage} onNavigate={setActivePage} />
+
+      {/* 中间主内容 */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {renderMainContent()}
       </div>
 
-      {/* 右侧：引用面板 */}
-      {currentId && showPanel && <ReferencePanel sessionId={currentId} />}
+      {/* 右侧引用面板（仅对话页） */}
+      {activePage === 'chat' && currentId && showPanel && (
+        <ReferencePanel sessionId={currentId} />
+      )}
     </div>
   )
 }
