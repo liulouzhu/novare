@@ -1,0 +1,4 @@
+{"role": "user", "content": "数据库现在有东西吗？"}
+{"role": "assistant", "content": "", "tool_calls": [{"id": "call_624fe46f46a44cad9ca704a8", "type": "function", "function": {"name": "knowledge_graph", "arguments": "{\"action\": \"stats\"}"}}]}
+{"role": "tool", "tool_call_id": "call_624fe46f46a44cad9ca704a8", "content": "知识图谱为空。使用 add_paper 或 add_concept 添加节点。"}
+{"role": "assistant", "content": "", "tool_calls": [{"id": "call_08cb98ac6c67495c91cda6ca", "type": "function", "function": {"name": "rag_query", "arguments": "{\"question\": \"已解析的论文有哪些\", \"top_k\": 10}"}}]}

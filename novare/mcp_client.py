@@ -71,8 +71,14 @@ class McpClient:
         return "\n".join(texts) if texts else str(result)
 
     async def close(self):
-        if self._session:
-            await self._session.__aexit__(None, None, None)
-        if self._cm:
-            await self._cm.__aexit__(None, None, None)
+        try:
+            if self._session:
+                await self._session.__aexit__(None, None, None)
+        except (RuntimeError, Exception) as e:
+            logger.debug("MCP session close warning: %s", e)
+        try:
+            if self._cm:
+                await self._cm.__aexit__(None, None, None)
+        except (RuntimeError, Exception) as e:
+            logger.debug("MCP transport close warning: %s", e)
         logger.info("MCP server closed")

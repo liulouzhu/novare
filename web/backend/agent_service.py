@@ -18,7 +18,7 @@ from novare.config import NovareConfig  # noqa: E402
 from novare.llm_client import LLMClient  # noqa: E402
 from novare.mcp_client import McpClient  # noqa: E402
 from novare.session import Session  # noqa: E402
-from novare.tools.registry import ToolRegistry  # noqa: E402
+from novare.tools.registry import ToolDef, ToolRegistry  # noqa: E402
 
 logger = logging.getLogger("novare.web")
 
@@ -55,11 +55,18 @@ class AgentService:
                     env=mcp_cfg.env,
                 )
                 await client.connect()
-                tools = await client.list_tools()
-                for tool_def in tools:
+                raw_tools = await client.list_tools()
+                for t in raw_tools:
+                    tool_def = ToolDef(
+                        name=t["name"],
+                        description=t["description"],
+                        parameters=t.get("inputSchema", {}),
+                        handler=_make_mcp_handler(client, t["name"]),
+                        source=f"mcp:{name}",
+                    )
                     self.tool_registry.register_tool(tool_def)
                 self._mcp_clients.append(client)
-                logger.info("Registered %d tools from %s", len(tools), name)
+                logger.info("Registered %d tools from %s", len(raw_tools), name)
             except Exception:
                 logger.exception("Failed to connect MCP server: %s", name)
 
@@ -169,6 +176,13 @@ class AgentService:
             logger.exception("run_turn failed")
             await queue.put({"type": "error", "message": str(e)})
             return ""
+
+
+def _make_mcp_handler(client: McpClient, tool_name: str):
+    """创建 MCP 工具的 handler 闭包，调用 MCP client 的 call_tool"""
+    async def handler(arguments: dict, **kwargs) -> str:
+        return await client.call_tool(tool_name, arguments)
+    return handler
 
 
 def _extract_title(messages: list[dict]) -> str:

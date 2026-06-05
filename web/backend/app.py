@@ -30,8 +30,13 @@ async def lifespan(app: FastAPI):
     # 切换工作目录到项目根目录（.env 在此）
     os.chdir(PROJECT_ROOT)
     await agent_service.initialize()
-    yield
-    await agent_service.shutdown()
+    try:
+        yield
+    finally:
+        try:
+            await agent_service.shutdown()
+        except Exception:
+            logging.getLogger("novare.web").warning("Shutdown error (non-fatal)", exc_info=True)
 
 
 app = FastAPI(
