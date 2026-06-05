@@ -90,3 +90,46 @@ export async function uploadFile(file: File): Promise<{ filename: string; file_p
   if (!res.ok) throw new Error('Failed to upload file')
   return res.json()
 }
+
+// ── Knowledge Graph ──
+
+export interface GraphNode {
+  id: string
+  type: string
+  label: string
+  name: string
+  title: string
+  year: number | null
+  citation_count: number
+  description: string
+}
+
+export interface GraphLink {
+  source: string
+  target: string
+  type: string
+}
+
+export interface GraphData {
+  nodes: GraphNode[]
+  links: GraphLink[]
+}
+
+export interface GraphStats {
+  total_nodes: number
+  total_edges: number
+  node_types: Record<string, number>
+  edge_types: Record<string, number>
+}
+
+export async function fetchGraph(): Promise<GraphData> {
+  const res = await fetch(`${BASE}/api/graph`)
+  if (!res.ok) throw new Error('Failed to fetch graph')
+  return res.json()
+}
+
+export async function fetchGraphStats(): Promise<GraphStats> {
+  const res = await fetch(`${BASE}/api/graph/stats`)
+  if (!res.ok) throw new Error('Failed to fetch graph stats')
+  return res.json()
+}
