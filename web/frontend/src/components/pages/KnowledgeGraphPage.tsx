@@ -30,7 +30,7 @@ export function KnowledgeGraphPage() {
   const [fgReady, setFgReady] = useState(false)
   const graphRef = useRef<any>(null)
   const containerRef = useRef<HTMLDivElement>(null)
-  const [dimensions, setDimensions] = useState({ width: 800, height: 600 })
+  const [dimensions, setDimensions] = useState({ width: 0, height: 0 })
 
   // 动态导入 react-force-graph-2d
   useEffect(() => {
@@ -62,10 +62,18 @@ export function KnowledgeGraphPage() {
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
-    const obs = new ResizeObserver((entries) => {
-      const { width, height } = entries[0].contentRect
-      setDimensions({ width, height })
-    })
+
+    const update = () => {
+      const rect = el.getBoundingClientRect()
+      if (rect.width > 0 && rect.height > 0) {
+        setDimensions({ width: Math.floor(rect.width), height: Math.floor(rect.height) })
+      }
+    }
+
+    // 初始测量
+    update()
+
+    const obs = new ResizeObserver(() => update())
     obs.observe(el)
     return () => obs.disconnect()
   }, [])
@@ -164,7 +172,7 @@ export function KnowledgeGraphPage() {
         </div>
 
         {/* 画布 */}
-        <div ref={containerRef} className="flex-1 relative overflow-hidden">
+        <div ref={containerRef} className="flex-1 relative" style={{ width: '100%', height: '100%', overflow: 'hidden' }}>
           {isEmpty ? (
             <div className="flex items-center justify-center h-full">
               <div className="text-center">
@@ -175,7 +183,7 @@ export function KnowledgeGraphPage() {
                 </div>
               </div>
             </div>
-          ) : fgReady && ForceGraph2D ? (
+          ) : fgReady && ForceGraph2D && dimensions.width > 0 ? (
             <ForceGraph2D
               ref={graphRef}
               graphData={graphData}
