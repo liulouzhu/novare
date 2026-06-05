@@ -1,8 +1,14 @@
 /** 多行输入框 */
 
-import { useState, useRef, useCallback } from 'react'
-import { Send, Paperclip, Loader2 } from 'lucide-react'
+import { useState, useRef, useCallback, useEffect } from 'react'
+import { Send, Paperclip, Loader2, Search, FileText, HelpCircle } from 'lucide-react'
 import { uploadFile } from '@/lib/api'
+
+const SKILLS = [
+  { name: 'research', label: '文献综述', desc: '搜索论文 → 解析 → RAG → 生成综述', icon: <Search size={14} /> },
+  { name: 'parse', label: '论文解析', desc: '解析 PDF，提取结构化信息', icon: <FileText size={14} /> },
+  { name: 'ask', label: '语义问答', desc: '在已解析论文中检索答案', icon: <HelpCircle size={14} /> },
+]
 
 interface Props {
   onSend: (content: string, refs?: Array<{ type: string; id: string; title?: string }>) => void
@@ -13,8 +19,30 @@ export function InputBox({ onSend, disabled }: Props) {
   const [text, setText] = useState('')
   const [attachments, setAttachments] = useState<Array<{ name: string; path: string }>>([])
   const [uploading, setUploading] = useState(false)
+  const [showSkills, setShowSkills] = useState(false)
+  const [skillFilter, setSkillFilter] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // 检测 "/" 触发 Skill 列表
+  useEffect(() => {
+    if (text === '/' || (text.startsWith('/') && !text.includes(' ') && text.length < 20)) {
+      setShowSkills(true)
+      setSkillFilter(text.slice(1)) // "/" 后面的字符作为过滤
+    } else {
+      setShowSkills(false)
+    }
+  }, [text])
+
+  const filteredSkills = skillFilter
+    ? SKILLS.filter((s) => s.name.includes(skillFilter) || s.label.includes(skillFilter))
+    : SKILLS
+
+  const selectSkill = (skillName: string) => {
+    setText(`/${skillName} `)
+    setShowSkills(false)
+    textareaRef.current?.focus()
+  }
 
   const handleSend = useCallback(() => {
     if (!text.trim() || disabled) return
@@ -109,6 +137,38 @@ export function InputBox({ onSend, disabled }: Props) {
                   ×
                 </button>
               </span>
+            ))}
+          </div>
+        )}
+
+        {/* Skill 下拉列表 */}
+        {showSkills && filteredSkills.length > 0 && (
+          <div
+            className="mb-2 rounded-lg border overflow-hidden shadow-sm"
+            style={{ borderColor: 'var(--border-color)', backgroundColor: 'var(--bg-primary)' }}
+          >
+            <div className="px-3 py-1.5 text-xs font-medium border-b" style={{ borderColor: 'var(--border-color)', color: 'var(--text-tertiary)' }}>
+              Skill 命令
+            </div>
+            {filteredSkills.map((skill) => (
+              <button
+                key={skill.name}
+                onClick={() => selectSkill(skill.name)}
+                className="w-full flex items-center gap-3 px-3 py-2 text-sm text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+              >
+                <span style={{ color: 'var(--accent)' }}>{skill.icon}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="font-medium" style={{ color: 'var(--text-primary)' }}>
+                    /{skill.name}
+                    <span className="ml-2 text-xs font-normal" style={{ color: 'var(--text-secondary)' }}>
+                      {skill.label}
+                    </span>
+                  </div>
+                  <div className="text-xs truncate" style={{ color: 'var(--text-tertiary)' }}>
+                    {skill.desc}
+                  </div>
+                </div>
+              </button>
             ))}
           </div>
         )}

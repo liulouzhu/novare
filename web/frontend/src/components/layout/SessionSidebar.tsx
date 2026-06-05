@@ -50,7 +50,7 @@ export function SessionSidebar() {
             <Loader2 size={16} className="animate-spin" style={{ color: 'var(--text-tertiary)' }} />
           </div>
         )}
-        {sessions.map((s) => (
+        {sessions.filter((s) => s.message_count > 0).map((s) => (
           <div
             key={s.session_id}
             onClick={() => switchSession(s.session_id)}
@@ -73,7 +73,7 @@ export function SessionSidebar() {
           </div>
         ))}
 
-        {!loading && sessions.length === 0 && (
+        {!loading && sessions.filter((s) => s.message_count > 0).length === 0 && (
           <div className="text-center py-8 text-sm" style={{ color: 'var(--text-tertiary)' }}>
             暂无会话
           </div>
