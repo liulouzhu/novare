@@ -50,15 +50,26 @@ async def handle_paper_parse(args: dict) -> str:
     """解析论文 PDF"""
     paper_id = args.get("paper_id")
     pdf_url = args.get("pdf_url")
+    file_path = args.get("file_path")
 
-    if not paper_id and not pdf_url:
-        return "错误：请提供 paper_id 或 pdf_url。"
+    if not paper_id and not pdf_url and not file_path:
+        return "错误：请提供 paper_id、pdf_url 或 file_path。"
 
     os.makedirs(PAPERS_DIR, exist_ok=True)
 
     # 确定 PDF 来源
     pdf_path = None
     resolved_paper_id = paper_id
+    is_local_file = False
+
+    # 本地文件
+    if file_path:
+        if not os.path.exists(file_path):
+            return f"错误：文件不存在: {file_path}"
+        pdf_path = file_path
+        is_local_file = True
+        if not resolved_paper_id:
+            resolved_paper_id = os.path.splitext(os.path.basename(file_path))[0]
 
     with get_connection() as conn:
         # 尝试从数据库获取论文信息
@@ -71,7 +82,6 @@ async def handle_paper_parse(args: dict) -> str:
                     arxiv_id = paper_id.replace("arxiv:", "")
                     pdf_url = pdf_url or f"https://arxiv.org/pdf/{arxiv_id}"
                 elif paper.get("source") == "semantic_scholar":
-                    # 尝试从 Semantic Scholar 获取 PDF
                     if not pdf_url:
                         pdf_url = _try_get_s2_pdf_url(paper_id)
 
@@ -101,12 +111,18 @@ async def handle_paper_parse(args: dict) -> str:
                     f"如需重新解析，请先删除相关数据。"
                 )
 
-    # 用 MinerU 解析 PDF
+    # 解析 PDF
     try:
-        result = await parse_pdf_with_mineru(pdf_url)
-        if not result.success:
-            return f"错误：MinerU 解析失败 - {result.error}"
-        markdown_text = result.markdown
+        if is_local_file:
+            # 本地文件用 pymupdf4llm
+            from core.pdf_parser import parse_pdf_to_markdown
+            markdown_text = parse_pdf_to_markdown(pdf_path)
+        else:
+            # URL 用 MinerU
+            result = await parse_pdf_with_mineru(pdf_url)
+            if not result.success:
+                return f"错误：MinerU 解析失败 - {result.error}"
+            markdown_text = result.markdown
     except Exception as e:
         return f"错误：PDF 解析失败 - {str(e)}"
 
