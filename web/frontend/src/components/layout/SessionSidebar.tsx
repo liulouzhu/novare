@@ -104,27 +104,6 @@ export function SessionSidebar() {
         )}
       </div>
 
-      {/* 底部 Skill 快捷入口 */}
-      <div className="p-3 border-t" style={{ borderColor: 'var(--border-color)' }}>
-        <div className="text-xs mb-2" style={{ color: 'var(--text-tertiary)' }}>
-          快捷 Skill
-        </div>
-        <div className="flex gap-1.5">
-          {['research', 'parse', 'ask'].map((skill) => (
-            <button
-              key={skill}
-              className="px-2 py-1 text-xs rounded-md border transition-colors hover:bg-gray-100 dark:hover:bg-gray-800"
-              style={{ borderColor: 'var(--border-color)', color: 'var(--text-secondary)' }}
-              onClick={() => {
-                // TODO: 触发 Skill 输入
-              }}
-            >
-              /{skill}
-            </button>
-          ))}
-        </div>
-      </div>
-
       {/* 删除确认弹窗 */}
       {deleteTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ backgroundColor: 'rgba(0,0,0,0.4)' }} onClick={() => setDeleteTarget(null)}>
