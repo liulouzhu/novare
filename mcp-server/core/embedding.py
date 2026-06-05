@@ -1,5 +1,6 @@
 """向量化模块 - 百炼 text-embedding-v4 优先，本地 fallback"""
 
+import asyncio
 import logging
 import os
 
@@ -103,7 +104,7 @@ def get_embedding_dim() -> int:
 
 
 def embed_text(text: str) -> list[float]:
-    """对单个文本进行向量化"""
+    """对单个文本进行向量化（同步）"""
     embedder_type, embedder = get_embedder()
 
     if embedder_type == "bailian":
@@ -130,8 +131,13 @@ def embed_text(text: str) -> list[float]:
         return embedder.encode(text)
 
 
+async def embed_text_async(text: str) -> list[float]:
+    """对单个文本进行向量化（异步，不阻塞事件循环）"""
+    return await asyncio.to_thread(embed_text, text)
+
+
 def embed_batch(texts: list[str]) -> list[list[float]]:
-    """批量向量化"""
+    """批量向量化（同步）"""
     if not texts:
         return []
 
@@ -165,3 +171,8 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
 
     else:
         return embedder.encode_batch(texts)
+
+
+async def embed_batch_async(texts: list[str]) -> list[list[float]]:
+    """批量向量化（异步，不阻塞事件循环）"""
+    return await asyncio.to_thread(embed_batch, texts)

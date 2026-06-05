@@ -16,7 +16,7 @@ from core.database import (
     insert_citation,
     upsert_paper,
 )
-from core.embedding import embed_batch
+from core.embedding import embed_batch_async
 from core.pdf_parser import (
     split_into_sections,
     chunk_text,
@@ -152,7 +152,7 @@ async def handle_paper_parse(args: dict) -> str:
     # 向量化
     try:
         texts = [c["text"] for c in all_chunks]
-        embeddings = embed_batch(texts)
+        embeddings = await embed_batch_async(texts)
     except Exception as e:
         logger.warning("Embedding failed, saving chunks without vectors: %s", e)
         embeddings = None

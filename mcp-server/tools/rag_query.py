@@ -5,7 +5,7 @@ import logging
 import numpy as np
 
 from core.database import get_connection, get_all_embeddings
-from core.embedding import embed_text
+from core.embedding import embed_text_async
 
 logger = logging.getLogger("research-server.rag_query")
 
@@ -30,7 +30,7 @@ async def handle_rag_query(args: dict) -> str:
 
     # 计算查询向量
     try:
-        query_vec = np.array(embed_text(question), dtype=np.float32)
+        query_vec = np.array(await embed_text_async(question), dtype=np.float32)
     except Exception as e:
         return f"错误：查询向量化失败 - {str(e)}"
 
