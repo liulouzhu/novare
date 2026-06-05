@@ -137,7 +137,16 @@ class LLMClient:
     ) -> AsyncIterator[StreamChunk]:
         """流式调用，逐 chunk yield"""
         body = self._build_body(messages, tools, max_tokens, stream=True)
+        logger.debug("LLM stream request: model=%s, messages=%d, tools=%d",
+                      self.model, len(messages), len(tools or []))
+        for i, m in enumerate(messages):
+            role = m.get("role", "?")
+            content_preview = str(m.get("content", ""))[:80]
+            logger.debug("  [%d] %s: %s", i, role, content_preview)
         async with self._http.stream("POST", "/chat/completions", json=body) as resp:
+            if resp.status_code != 200:
+                error_body = await resp.aread()
+                logger.error("LLM API error %d: %s", resp.status_code, error_body.decode(errors="replace"))
             resp.raise_for_status()
             async for line in resp.aiter_lines():
                 chunk = parse_stream_line(line)

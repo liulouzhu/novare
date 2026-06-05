@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING, Callable
 
@@ -56,7 +57,7 @@ class AgentLoop:
 
             # 有工具调用：记录 assistant 消息（含 tool_calls）
             tool_calls_dicts = [
-                {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments}}
+                {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": json.dumps(tc.arguments, ensure_ascii=False)}}
                 for tc in response.tool_calls
             ]
             session.add_assistant_message(response.content or "", tool_calls=tool_calls_dicts)
