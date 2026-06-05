@@ -12,3 +12,8 @@ tests/
 docs/
 research-agent-design.md
 novare_test_harness.py
+
+# Frontend
+web/frontend/node_modules/
+web/frontend/dist/
+web/frontend/.vite/
