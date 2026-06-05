@@ -65,9 +65,9 @@ class NovareConfig:
 
         # 默认研究工具 MCP 服务器
         if not cfg.mcp_servers and (cfg.workspace / "mcp-server").exists():
-            venv_python = cfg.workspace / "mcp-server" / ".venv" / "Scripts" / "python.exe"
+            venv_python = cfg.workspace / ".venv" / "Scripts" / "python.exe"
             if not venv_python.exists():
-                venv_python = cfg.workspace / "mcp-server" / ".venv" / "bin" / "python"
+                venv_python = cfg.workspace / ".venv" / "bin" / "python"
             mcp_server_py = cfg.workspace / "mcp-server" / "research_server.py"
             if venv_python.exists() and mcp_server_py.exists():
                 cfg.mcp_servers["research"] = McpServerConfig(

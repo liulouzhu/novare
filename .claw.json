@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "research": {
-      "command": "D:/project/research-agent/mcp-server/.venv/Scripts/python.exe",
+      "command": "D:/project/research-agent/.venv/Scripts/python.exe",
       "args": ["-m", "research_server"],
       "cwd": "D:/project/research-agent/mcp-server",
       "env": {
