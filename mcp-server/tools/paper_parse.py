@@ -118,11 +118,14 @@ async def handle_paper_parse(args: dict) -> str:
             from core.pdf_parser import parse_pdf_to_markdown
             markdown_text = parse_pdf_to_markdown(pdf_path)
         else:
-            # URL 用 MinerU
-            result = await parse_pdf_with_mineru(pdf_url)
+            # URL 用 MinerU，保存到 papers 目录
+            save_dir = os.path.join(PAPERS_DIR, resolved_paper_id or "unknown")
+            result = await parse_pdf_with_mineru(pdf_url, save_dir=save_dir)
             if not result.success:
                 return f"错误：MinerU 解析失败 - {result.error}"
             markdown_text = result.markdown
+            if result.saved_dir:
+                logger.info("MinerU output saved to: %s", result.saved_dir)
     except Exception as e:
         return f"错误：PDF 解析失败 - {str(e)}"
 
