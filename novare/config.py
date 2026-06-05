@@ -63,12 +63,13 @@ class NovareConfig:
             except (json.JSONDecodeError, OSError):
                 pass  # 配置文件损坏时使用默认值
 
-        # 默认研究工具 MCP 服务器
-        if not cfg.mcp_servers and (cfg.workspace / "mcp-server").exists():
-            venv_python = cfg.workspace / ".venv" / "Scripts" / "python.exe"
+        # 默认研究工具 MCP 服务器（在项目根目录查找）
+        project_root = Path.cwd()
+        if not cfg.mcp_servers and (project_root / "mcp-server").exists():
+            venv_python = project_root / ".venv" / "Scripts" / "python.exe"
             if not venv_python.exists():
-                venv_python = cfg.workspace / ".venv" / "bin" / "python"
-            mcp_server_py = cfg.workspace / "mcp-server" / "research_server.py"
+                venv_python = project_root / ".venv" / "bin" / "python"
+            mcp_server_py = project_root / "mcp-server" / "research_server.py"
             if venv_python.exists() and mcp_server_py.exists():
                 cfg.mcp_servers["research"] = McpServerConfig(
                     command=str(venv_python),
