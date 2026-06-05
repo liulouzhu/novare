@@ -31,6 +31,7 @@ class LLMResponse:
 class StreamChunk:
     """流式输出的单个 chunk"""
     content_delta: str = ""          # 文本增量
+    reasoning_delta: str = ""        # 推理过程增量（MiMo 等推理模型）
     tool_call_index: int | None = None
     tool_call_id: str = ""
     tool_call_name: str = ""
@@ -84,6 +85,7 @@ def parse_stream_line(line: str) -> StreamChunk | None:
 
     chunk = StreamChunk(
         content_delta=delta.get("content") or "",
+        reasoning_delta=delta.get("reasoning_content") or "",
         finish_reason=finish,
     )
 
@@ -149,6 +151,8 @@ class LLMClient:
                 logger.error("LLM API error %d: %s", resp.status_code, error_body.decode(errors="replace"))
             resp.raise_for_status()
             async for line in resp.aiter_lines():
+                if line.startswith("data: ") and line.strip() != "data: [DONE]":
+                    logger.debug("SSE line: %s", line[:200])
                 chunk = parse_stream_line(line)
                 if chunk is not None:
                     yield chunk
@@ -166,6 +170,11 @@ class LLMClient:
         finish_reason = "stop"
 
         async for chunk in self.chat_stream(messages, tools, max_tokens):
+            # 推理过程（MiMo 等推理模型的思考过程）
+            if chunk.reasoning_delta:
+                if on_text:
+                    on_text(chunk.reasoning_delta)
+
             # 文本增量
             if chunk.content_delta:
                 content_parts.append(chunk.content_delta)
