@@ -1,9 +1,9 @@
 """向量化模块 - 百炼 text-embedding-v4 优先，本地 fallback"""
 
-import asyncio
 import logging
 import os
 
+import anyio
 import httpx
 
 logger = logging.getLogger("research-server.embedding")
@@ -133,7 +133,7 @@ def embed_text(text: str) -> list[float]:
 
 async def embed_text_async(text: str) -> list[float]:
     """对单个文本进行向量化（异步，不阻塞事件循环）"""
-    return await asyncio.to_thread(embed_text, text)
+    return await anyio.to_thread.run_sync(embed_text, text)
 
 
 def embed_batch(texts: list[str]) -> list[list[float]]:
@@ -175,4 +175,4 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
 
 async def embed_batch_async(texts: list[str]) -> list[list[float]]:
     """批量向量化（异步，不阻塞事件循环）"""
-    return await asyncio.to_thread(embed_batch, texts)
+    return await anyio.to_thread.run_sync(embed_batch, texts)
