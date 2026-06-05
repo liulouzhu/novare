@@ -75,7 +75,10 @@ def parse_stream_line(line: str) -> StreamChunk | None:
     except json.JSONDecodeError:
         return None
 
-    choice = obj.get("choices", [{}])[0]
+    choice = obj.get("choices") or []
+    if not choice:
+        return None
+    choice = choice[0]
     delta = choice.get("delta", {})
     finish = choice.get("finish_reason")
 
