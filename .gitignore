@@ -6,3 +6,9 @@ __pycache__/
 dist/
 build/
 .env
+.pytest_cache/
+data/
+tests/
+docs/
+research-agent-design.md
+novare_test_harness.py
