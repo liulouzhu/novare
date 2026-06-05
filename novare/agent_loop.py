@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from novare.llm_client import LLMClient
@@ -27,17 +27,27 @@ class AgentLoop:
         self.system_prompt = system_prompt
         self.max_iterations = max_iterations
 
-    async def run_turn(self, session, user_input: str) -> str:
-        """执行一轮对话：用户输入 → LLM → 工具循环 → 最终回答"""
+    async def run_turn(
+        self,
+        session,
+        user_input: str,
+        on_text: Callable[[str], None] | None = None,
+    ) -> str:
+        """执行一轮对话：用户输入 → LLM（流式） → 工具循环 → 最终回答
+
+        on_text: 可选回调，流式输出时逐 chunk 调用，用于实时打印文本。
+        """
         session.add_user_message(user_input)
 
         for iteration in range(self.max_iterations):
             # 构建消息
             messages = self._build_messages(session)
 
-            # 调用 LLM
+            # 流式调用 LLM，on_text 实时输出
             tools = self.tool_registry.to_openai_tools()
-            response = await self.llm_client.chat(messages, tools=tools)
+            response = await self.llm_client.collect_stream(
+                messages, tools=tools, on_text=on_text,
+            )
 
             # 如果没有工具调用，返回最终回答
             if not response.tool_calls:

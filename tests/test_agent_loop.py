@@ -12,7 +12,8 @@ from novare.tools.registry import ToolRegistry, ToolDef
 class TestAgentLoop:
     def _make_loop(self, responses: list[LLMResponse], tool_handler=None):
         llm = AsyncMock()
-        llm.chat = AsyncMock(side_effect=responses)
+        # agent_loop 现在调用 collect_stream（非生成器，直接返回 LLMResponse）
+        llm.collect_stream = AsyncMock(side_effect=responses)
         llm.close = AsyncMock()
 
         registry = ToolRegistry()

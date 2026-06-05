@@ -129,8 +129,9 @@ async def main():
 
             # 正常对话
             try:
-                result = await agent.run_turn(session, user_input)
-                print(f"\n{result}")
+                print()  # 换行
+                result = await agent.run_turn(session, user_input, on_text=lambda t: print(t, end="", flush=True))
+                print()  # 流式结束后换行
                 session.save()
             except KeyboardInterrupt:
                 print("\n[Interrupted]")
