@@ -75,8 +75,9 @@ class AgentLoop:
                 t0 = time.monotonic()
                 result = await self.tool_registry.execute(tc.name, tc.arguments)
                 elapsed = time.monotonic() - t0
-                # ToolRegistry 内部 catch 异常返回 "Error: ..." 字符串
-                if result.startswith("Error"):
+                # 检测工具执行错误
+                is_error = result.startswith("Error") or result.startswith("错误") or result.startswith("搜索失败")
+                if is_error:
                     if on_tool:
                         on_tool("error", tc.name, tc.arguments, result, elapsed)
                 else:

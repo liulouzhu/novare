@@ -23,7 +23,7 @@ function convertBackendMessages(raw: Array<{ role: string; content: string; tool
           if (m.role === 'assistant' && m.toolCalls) {
             const idx = m.toolCalls.findIndex((t) => t.name === tc.name && t.status === 'running')
             if (idx !== -1) {
-              const isError = msg.content.startsWith('Error')
+              const isError = msg.content.startsWith('Error') || msg.content.startsWith('错误') || msg.content.startsWith('搜索失败')
               m.toolCalls[idx] = {
                 ...m.toolCalls[idx],
                 status: isError ? 'error' : 'success',

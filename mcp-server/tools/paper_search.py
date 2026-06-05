@@ -39,15 +39,20 @@ async def _search_semantic_scholar(
     headers = {"User-Agent": "Novare-ResearchAgent/0.1"}
     s2_key = os.environ.get("S2_API_KEY")
     if s2_key:
-        params["api-key"] = s2_key
+        headers["x-api-key"] = s2_key
 
-    for attempt in range(3):
-        try:
-            async with httpx.AsyncClient(timeout=30, headers=headers) as client:
+    async with httpx.AsyncClient(timeout=30, headers=headers, follow_redirects=True) as client:
+        for attempt in range(3):
+            try:
                 resp = await client.get(S2_API, params=params)
 
                 if resp.status_code == 429:
-                    wait = 2 ** attempt
+                    # 优先使用 Retry-After header，否则指数退避
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after:
+                        wait = min(int(retry_after), 30)
+                    else:
+                        wait = 2 ** attempt
                     logger.warning("Semantic Scholar rate limited, retrying in %ds (attempt %d/3)", wait, attempt + 1)
                     await asyncio.sleep(wait)
                     continue
@@ -55,54 +60,56 @@ async def _search_semantic_scholar(
                 resp.raise_for_status()
                 data = resp.json()
 
-            results = []
-            for paper in data.get("data", []):
-                ext_ids = paper.get("externalIds", {}) or {}
-                paper_id = (
-                    ext_ids.get("DOI")
-                    or ext_ids.get("ArXiv")
-                    or paper.get("paperId", "")
-                )
-                if not paper_id:
-                    continue
+                results = []
+                for paper in data.get("data", []):
+                    ext_ids = paper.get("externalIds", {}) or {}
+                    paper_id = (
+                        ext_ids.get("DOI")
+                        or ext_ids.get("ArXiv")
+                        or paper.get("paperId", "")
+                    )
+                    if not paper_id:
+                        continue
 
-                # 确定 ID 类型
-                if ext_ids.get("DOI"):
-                    source_id = f"doi:{ext_ids['DOI']}"
-                elif ext_ids.get("ArXiv"):
-                    source_id = f"arxiv:{ext_ids['ArXiv']}"
-                else:
-                    source_id = f"s2:{paper.get('paperId', '')}"
+                    if ext_ids.get("DOI"):
+                        source_id = f"doi:{ext_ids['DOI']}"
+                    elif ext_ids.get("ArXiv"):
+                        source_id = f"arxiv:{ext_ids['ArXiv']}"
+                    else:
+                        source_id = f"s2:{paper.get('paperId', '')}"
 
-                authors = [a.get("name", "") for a in (paper.get("authors") or [])]
-                pdf_url = None
-                oa = paper.get("openAccessPdf")
-                if oa:
-                    pdf_url = oa.get("url")
+                    authors = [a.get("name", "") for a in (paper.get("authors") or [])]
+                    pdf_url = None
+                    oa = paper.get("openAccessPdf")
+                    if oa:
+                        pdf_url = oa.get("url")
 
-                results.append({
-                    "id": source_id,
-                    "title": paper.get("title", ""),
-                    "authors": authors,
-                    "abstract": paper.get("abstract", ""),
-                    "year": paper.get("year"),
-                    "source": "semantic_scholar",
-                    "url": f"https://www.semanticscholar.org/paper/{paper.get('paperId', '')}",
-                    "pdf_url": pdf_url,
-                    "citation_count": paper.get("citationCount", 0),
-                })
-            return results, ""
+                    results.append({
+                        "id": source_id,
+                        "title": paper.get("title", ""),
+                        "authors": authors,
+                        "abstract": paper.get("abstract", ""),
+                        "year": paper.get("year"),
+                        "source": "semantic_scholar",
+                        "url": f"https://www.semanticscholar.org/paper/{paper.get('paperId', '')}",
+                        "pdf_url": pdf_url,
+                        "citation_count": paper.get("citationCount", 0),
+                    })
+                return results, ""
 
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 429:
-                if attempt < 2:
-                    continue
-                return [], "Semantic Scholar: 请求频率超限(429)，请稍后重试"
-            logger.error("Semantic Scholar API error: %s", e)
-            return [], f"Semantic Scholar: HTTP {e.response.status_code}"
-        except Exception as e:
-            logger.error("Semantic Scholar search failed: %s", e)
-            return [], f"Semantic Scholar: {type(e).__name__}"
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429:
+                    if attempt < 2:
+                        retry_after = e.response.headers.get("Retry-After")
+                        wait = min(int(retry_after), 30) if retry_after else 2 ** attempt
+                        await asyncio.sleep(wait)
+                        continue
+                    return [], "Semantic Scholar: 请求频率超限(429)，请稍后重试"
+                logger.error("Semantic Scholar API error: %s", e)
+                return [], f"Semantic Scholar: HTTP {e.response.status_code}"
+            except Exception as e:
+                logger.error("Semantic Scholar search failed: %s", e)
+                return [], f"Semantic Scholar: {type(e).__name__}"
 
     return [], "Semantic Scholar: 请求频率超限(429)，已重试3次"
 
@@ -114,7 +121,6 @@ async def _search_arxiv(
     limit: int = 10,
 ) -> tuple[list[dict], str]:
     """查询 arXiv API。返回 (结果列表, 错误信息)"""
-    # 构建搜索查询
     search_query = f"all:{query}"
     params = {
         "search_query": search_query,
@@ -124,67 +130,80 @@ async def _search_arxiv(
         "sortOrder": "descending",
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=60, headers={"User-Agent": "Novare-ResearchAgent/0.1"}) as client:
-            resp = await client.get(ARXIV_API, params=params)
-            resp.raise_for_status()
-            xml_text = resp.text
+    async with httpx.AsyncClient(timeout=60, headers={"User-Agent": "Novare-ResearchAgent/0.1"}, follow_redirects=True) as client:
+        for attempt in range(3):
+            try:
+                resp = await client.get(ARXIV_API, params=params)
 
-        # 解析 Atom XML
-        ns = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
-        root = ET.fromstring(xml_text)
+                if resp.status_code in (429, 503):
+                    wait = 3 * (attempt + 1)  # arXiv 建议至少 3s 间隔
+                    logger.warning("arXiv rate limited (%d), retrying in %ds", resp.status_code, wait)
+                    await asyncio.sleep(wait)
+                    continue
 
-        results = []
-        for entry in root.findall("atom:entry", ns):
-            title = entry.findtext("atom:title", "", ns).strip().replace("\n", " ")
-            summary = entry.findtext("atom:summary", "", ns).strip().replace("\n", " ")
+                resp.raise_for_status()
+                xml_text = resp.text
 
-            # 提取 arXiv ID
-            entry_id = entry.findtext("atom:id", "", ns)
-            arxiv_id = entry_id.split("/abs/")[-1] if "/abs/" in entry_id else entry_id
-            # 去掉版本号
-            arxiv_base = arxiv_id.split("v")[0] if "v" in arxiv_id else arxiv_id
+                # 解析 Atom XML
+                ns = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
+                root = ET.fromstring(xml_text)
 
-            # 作者
-            authors = []
-            for author in entry.findall("atom:author", ns):
-                name = author.findtext("atom:name", "", ns)
-                if name:
-                    authors.append(name)
+                results = []
+                for entry in root.findall("atom:entry", ns):
+                    title = entry.findtext("atom:title", "", ns).strip().replace("\n", " ")
+                    summary = entry.findtext("atom:summary", "", ns).strip().replace("\n", " ")
 
-            # 发布年份
-            published = entry.findtext("atom:published", "")
-            year = int(published[:4]) if published and len(published) >= 4 else None
+                    entry_id = entry.findtext("atom:id", "", ns)
+                    arxiv_id = entry_id.split("/abs/")[-1] if "/abs/" in entry_id else entry_id
+                    arxiv_base = arxiv_id.split("v")[0] if "v" in arxiv_id else arxiv_id
 
-            # 年份过滤
-            if year_from and year and year < year_from:
-                continue
-            if year_to and year and year > year_to:
-                continue
+                    authors = []
+                    for author in entry.findall("atom:author", ns):
+                        name = author.findtext("atom:name", "", ns)
+                        if name:
+                            authors.append(name)
 
-            # PDF 链接
-            pdf_url = None
-            for link in entry.findall("atom:link", ns):
-                if link.get("title") == "pdf":
-                    pdf_url = link.get("href")
-                    break
+                    published = entry.findtext("atom:published", "")
+                    year = int(published[:4]) if published and len(published) >= 4 else None
 
-            results.append({
-                "id": f"arxiv:{arxiv_base}",
-                "title": title,
-                "authors": authors,
-                "abstract": summary[:500],  # arXiv 摘要可能很长
-                "year": year,
-                "source": "arxiv",
-                "url": f"https://arxiv.org/abs/{arxiv_base}",
-                "pdf_url": pdf_url or f"https://arxiv.org/pdf/{arxiv_base}",
-                "citation_count": 0,  # arXiv API 不提供引用数
-            })
-        return results, ""
+                    if year_from and year and year < year_from:
+                        continue
+                    if year_to and year and year > year_to:
+                        continue
 
-    except Exception as e:
-        logger.error("arXiv search failed: %s", e)
-        return [], f"arXiv: {type(e).__name__}"
+                    pdf_url = None
+                    for link in entry.findall("atom:link", ns):
+                        if link.get("title") == "pdf":
+                            pdf_url = link.get("href")
+                            break
+
+                    results.append({
+                        "id": f"arxiv:{arxiv_base}",
+                        "title": title,
+                        "authors": authors,
+                        "abstract": summary[:500],
+                        "year": year,
+                        "source": "arxiv",
+                        "url": f"https://arxiv.org/abs/{arxiv_base}",
+                        "pdf_url": pdf_url or f"https://arxiv.org/pdf/{arxiv_base}",
+                        "citation_count": 0,
+                    })
+                return results, ""
+
+            except httpx.HTTPStatusError as e:
+                logger.error("arXiv API error (attempt %d): %s", attempt + 1, e)
+                if e.response.status_code in (429, 503) and attempt < 2:
+                    await asyncio.sleep(3 * (attempt + 1))
+                    continue
+                return [], f"arXiv: HTTP {e.response.status_code}"
+            except Exception as e:
+                logger.error("arXiv search failed (attempt %d): %s", attempt + 1, e)
+                if attempt < 2:
+                    await asyncio.sleep(2)
+                    continue
+                return [], f"arXiv: {type(e).__name__}"
+
+    return [], "arXiv: 已重试3次仍失败"
 
 
 def _merge_results(s2_results: list[dict], arxiv_results: list[dict], limit: int) -> list[dict]:
