@@ -12,6 +12,7 @@ from novare.session import Session
 from novare.tools.registry import ToolRegistry, ToolDef
 from novare.mcp_client import McpClient
 from novare.agent_loop import AgentLoop
+from novare.skill import Skill, discover_skills
 
 
 async def main():
@@ -81,12 +82,16 @@ async def main():
         system_prompt=config.system_prompt,
     )
 
+    # 发现 Skills
+    skills = discover_skills(config.skill_dirs)
+    skill_map: dict[str, Skill] = {s.name: s for s in skills}
+
     # 创建默认 session
     session = Session(workspace=config.workspace)
 
     # REPL
     print("Novare 科研智能体 (输入 /help 查看命令)")
-    print(f"模型: {config.model} | 工具: {len(tool_registry.list_tools())} 个")
+    print(f"模型: {config.model} | 工具: {len(tool_registry.list_tools())} 个 | Skills: {len(skills)} 个")
     print("-" * 50)
 
     try:
@@ -123,8 +128,30 @@ async def main():
                 session = Session(workspace=config.workspace)
                 print(f"New session: {session.session_id}")
                 continue
+            elif user_input == "/skills":
+                if not skill_map:
+                    print("No skills found. Add .md files to .novare/skills/")
+                else:
+                    print(f"Available skills ({len(skill_map)}):")
+                    for s in skills:
+                        desc = f" — {s.description}" if s.description else ""
+                        print(f"  /{s.name}{desc}")
+                continue
+            elif user_input.startswith("/skill "):
+                parts = user_input.split(None, 2)
+                skill_name = parts[1] if len(parts) > 1 else ""
+                skill_args = parts[2] if len(parts) > 2 else ""
+                await _invoke_skill(skill_name, skill_args, skill_map, agent, session)
+                continue
             elif user_input.startswith("/"):
                 print(f"Unknown command: {user_input}. Type /help for available commands.")
+                continue
+
+            # 裸词 Skill 匹配：第一个词匹配 skill 名称则自动调用
+            first_word = user_input.split()[0] if user_input.split() else ""
+            if first_word in skill_map:
+                skill_args = user_input[len(first_word):].strip()
+                await _invoke_skill(first_word, skill_args, skill_map, agent, session)
                 continue
 
             # 正常对话
@@ -150,13 +177,46 @@ def _print_help():
     print("""
 Novare 命令:
   /help          显示此帮助
+  /skills        列出可用 Skills
+  /skill <name>  调用 Skill（也可直接输入 skill 名称）
   /sessions      列出所有会话
   /session <id>  加载指定会话
   /new           创建新会话
   /exit          退出
 
 直接输入文字开始对话，Novare 会自动调用工具完成科研任务。
+输入 Skill 名称（如 research Transformer）可快速调用预设流程。
 """)
+
+
+async def _invoke_skill(
+    name: str,
+    args: str,
+    skill_map: dict[str, Skill],
+    agent: AgentLoop,
+    session: Session,
+):
+    """调用一个 skill：渲染模板 → run_turn"""
+    skill = skill_map.get(name)
+    if not skill:
+        print(f"Unknown skill: {name}")
+        available = ", ".join(f"/{s}" for s in skill_map) or "(none)"
+        print(f"Available: {available}")
+        return
+
+    prompt = skill.render(args)
+    logger.info("Invoking skill '%s' with args='%s'", name, args)
+    print(f"[skill: {name}]")
+    try:
+        print()
+        result = await agent.run_turn(session, prompt, on_text=lambda t: print(t, end="", flush=True))
+        print()
+        session.save()
+    except KeyboardInterrupt:
+        print("\n[Interrupted]")
+    except Exception as e:
+        logger.exception("Error invoking skill %s", name)
+        print(f"\nError: {e}")
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ class NovareConfig:
     workspace: Path = Path("./workspace")
     mcp_servers: dict[str, McpServerConfig] = field(default_factory=dict)
     system_prompt: str = ""
+    skill_dirs: list[Path] = field(default_factory=list)
 
     @classmethod
     def load(cls, config_path: str | Path | None = None) -> "NovareConfig":
@@ -80,6 +81,16 @@ class NovareConfig:
         # 默认系统提示词
         if not cfg.system_prompt:
             cfg.system_prompt = _default_system_prompt(cfg.workspace)
+
+        # Skill 目录：项目级 + 用户级
+        skill_dirs_env = os.environ.get("NOVARE_SKILL_DIR")
+        if skill_dirs_env:
+            cfg.skill_dirs = [Path(p).resolve() for p in skill_dirs_env.split(os.pathsep)]
+        else:
+            cfg.skill_dirs = [
+                cfg.workspace / ".novare" / "skills",
+                Path.home() / ".novare" / "skills",
+            ]
 
         return cfg
 
