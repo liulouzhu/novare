@@ -210,11 +210,14 @@ def get_all_embeddings(conn: sqlite3.Connection) -> list[dict]:
 # ── Citation CRUD ─────────────────────────────────────────────────────────
 
 def insert_citation(conn: sqlite3.Connection, source_id: str, target_id: str) -> None:
-    """插入引用关系"""
-    conn.execute("""
-        INSERT OR IGNORE INTO citations (source_id, target_id)
-        VALUES (?, ?)
-    """, (source_id, target_id))
+    """插入引用关系（忽略外键约束失败）"""
+    try:
+        conn.execute("""
+            INSERT OR IGNORE INTO citations (source_id, target_id)
+            VALUES (?, ?)
+        """, (source_id, target_id))
+    except sqlite3.IntegrityError:
+        pass  # 引用的论文不在数据库中，跳过
 
 
 def get_citations(conn: sqlite3.Connection, paper_id: str) -> dict:

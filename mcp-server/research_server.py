@@ -4,6 +4,12 @@ import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# 加载项目根目录的 .env
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from mcp.server import Server, InitializationOptions, NotificationOptions
 from mcp.server.stdio import stdio_server

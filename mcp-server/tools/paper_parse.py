@@ -18,12 +18,12 @@ from core.database import (
 )
 from core.embedding import embed_batch
 from core.pdf_parser import (
-    parse_pdf_to_markdown,
     split_into_sections,
     chunk_text,
     extract_references,
     extract_paper_ids_from_refs,
 )
+from core.mineru import parse_pdf_with_mineru
 
 logger = logging.getLogger("research-server.paper_parse")
 
@@ -101,9 +101,12 @@ async def handle_paper_parse(args: dict) -> str:
                     f"如需重新解析，请先删除相关数据。"
                 )
 
-    # 解析 PDF
+    # 用 MinerU 解析 PDF
     try:
-        markdown_text = parse_pdf_to_markdown(pdf_path)
+        result = await parse_pdf_with_mineru(pdf_url)
+        if not result.success:
+            return f"错误：MinerU 解析失败 - {result.error}"
+        markdown_text = result.markdown
     except Exception as e:
         return f"错误：PDF 解析失败 - {str(e)}"
 
