@@ -174,7 +174,12 @@ class AgentService:
             return result
         except Exception as e:
             logger.exception("run_turn failed")
-            await queue.put({"type": "error", "message": str(e)})
+            error_msg = str(e)
+            if "ReadTimeout" in type(e).__name__ or "ReadTimeout" in error_msg:
+                error_msg = "LLM API 响应超时，请稍后重试（可能是模型处理时间过长）"
+            elif "ConnectError" in type(e).__name__ or "Connect" in error_msg:
+                error_msg = "无法连接到 LLM API，请检查网络和 API 配置"
+            await queue.put({"type": "error", "message": error_msg})
             return ""
 
 
