@@ -13,12 +13,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from uuid import UUID
+
 from novare.agent_loop import AgentLoop  # noqa: E402
 from novare.config import NovareConfig  # noqa: E402
 from novare.llm_client import LLMClient  # noqa: E402
 from novare.mcp_client import McpClient  # noqa: E402
-from novare.session import Session  # noqa: E402
+from novare.session import Session, JsonlSessionStore  # noqa: E402
 from novare.tools.registry import ToolDef, ToolRegistry  # noqa: E402
+from web.backend.db.base import SessionLocal  # noqa: E402
+from web.backend.repositories import SessionRepository, MessageRepository  # noqa: E402
 
 logger = logging.getLogger("novare.web")
 
@@ -127,6 +131,7 @@ class AgentService:
         session: Session,
         user_input: str,
         queue: asyncio.Queue,
+        user_id: str | None = None,
     ):
         """执行一轮对话，通过 queue 将事件推送给 WebSocket
 
@@ -164,11 +169,48 @@ class AgentService:
                 })
 
         try:
+            # 记录本轮前的消息数，用于提取新增消息
+            msgs_before = len(session.messages)
+
             result = await self.agent.run_turn(
                 session, user_input,
                 on_text=on_text,
                 on_tool=on_tool,
             )
+
+            # ── 持久化到 PostgreSQL（仅当 user_id 存在时） ──
+            if user_id:
+                try:
+                    user_uuid = UUID(user_id)
+                    db = SessionLocal()
+                    try:
+                        # 确保 DB session 存在
+                        session_repo = SessionRepository(db, user_uuid)
+                        if not session_repo.get_by_id(session.session_id):
+                            session_repo.create(session.session_id, title="新会话")
+
+                        # 增量追加本轮新消息到 DB
+                        new_messages = session.messages[msgs_before:]
+                        if new_messages:
+                            msg_repo = MessageRepository(db, user_uuid)
+                            for msg in new_messages:
+                                msg_repo.add_message(
+                                    session_id=session.session_id,
+                                    role=msg["role"],
+                                    content=msg.get("content"),
+                                    tool_calls=msg.get("tool_calls"),
+                                    tool_call_id=msg.get("tool_call_id"),
+                                )
+                        db.commit()
+                    except Exception:
+                        db.rollback()
+                        logger.exception("Failed to persist messages to DB")
+                    finally:
+                        db.close()
+                except Exception:
+                    logger.exception("DB persistence error (non-fatal)")
+
+            # ── 持久化到 JSONL（agent loop 需要） ──
             session.save()
             await queue.put({"type": "done"})
             return result

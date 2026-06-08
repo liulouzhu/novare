@@ -89,7 +89,7 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
 
             # 在后台任务中执行 agent.run_turn
             task = asyncio.create_task(
-                agent_service.run_turn(session, user_input, queue)
+                agent_service.run_turn(session, user_input, queue, user_id=user_id_str)
             )
 
             # 从 queue 读取事件并推送给客户端
