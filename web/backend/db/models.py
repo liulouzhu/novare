@@ -44,6 +44,7 @@ class Paper(Base):
     url = Column(Text)
     citation_count = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
 class UserPaper(Base):
@@ -118,10 +119,14 @@ class KnowledgeNode(Base):
     type = Column(String(50))  # concept, paper, author, method, dataset, task
     properties = Column(JSONB, default=dict)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
 class KnowledgeEdge(Base):
     __tablename__ = "knowledge_edges"
+    __table_args__ = (
+        UniqueConstraint("user_id", "source_node_id", "target_node_id", "relation_type", name="uq_user_edge"),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
@@ -130,3 +135,4 @@ class KnowledgeEdge(Base):
     relation_type = Column(String(100), nullable=False)
     properties = Column(JSONB, default=dict)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
