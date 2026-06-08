@@ -109,12 +109,12 @@ async def get_paper_chunks(
     ]
 
 
-@router.get("/{paper_id:path}/pdf")
+@router.get("/pdf/view")
 async def get_paper_pdf(
-    paper_id: str,
+    paper_id: str = Query(..., description="论文 ID"),
     db: Session = Depends(get_db),
 ):
-    """获取论文 PDF 文件（无需认证，便于新标签页打开）"""
+    """获取论文 PDF（无需认证，查询参数传 ID 避免路径冲突）"""
     from fastapi.responses import RedirectResponse
 
     paper_repo = PaperRepository(db)
@@ -137,11 +137,10 @@ async def get_paper_pdf(
         return RedirectResponse(url=f"https://arxiv.org/pdf/{arxiv_id}", status_code=302)
 
     if pid.startswith("doi:10.48550/arXiv."):
-        # doi 格式的 arXiv 论文
         arxiv_id = pid.removeprefix("doi:10.48550/arXiv.")
         return RedirectResponse(url=f"https://arxiv.org/pdf/{arxiv_id}", status_code=302)
 
-    # 3. Semantic Scholar — 跳转到论文页面（页面上有 PDF 链接）
+    # 3. Semantic Scholar — 跳转到论文页面
     if paper.url:
         return RedirectResponse(url=paper.url, status_code=302)
 

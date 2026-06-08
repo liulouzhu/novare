@@ -157,7 +157,7 @@ export function PaperLibraryPage() {
                   <div className="flex items-center gap-1 shrink-0">
                     {(paper.pdf_path || paper.url) && (
                       <a
-                        href={`/api/papers/${encodeURIComponent(paper.id)}/pdf`}
+                        href={`/api/papers/pdf/view?paper_id=${encodeURIComponent(paper.id)}`}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="p-1.5 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
