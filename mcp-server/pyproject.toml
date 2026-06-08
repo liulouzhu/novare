@@ -13,6 +13,7 @@ dependencies = [
     "pymupdf4llm>=0.0",
     "networkx>=3.0",
     "numpy>=1.26",
+    "pymilvus>=2.4",
 ]
 
 [project.optional-dependencies]

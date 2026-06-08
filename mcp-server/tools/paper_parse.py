@@ -29,6 +29,7 @@ logger = logging.getLogger("research-server.paper_parse")
 
 PAPERS_DIR = os.environ.get("RESEARCH_DATA_DIR", "./data")
 PAPERS_DIR = os.path.join(PAPERS_DIR, "papers")
+DEFAULT_USER_ID = os.getenv("RAG_DEFAULT_USER", "default")
 
 
 async def _download_pdf(url: str, dest_path: str) -> bool:
@@ -44,6 +45,22 @@ async def _download_pdf(url: str, dest_path: str) -> bool:
     except Exception as e:
         logger.error("Failed to download PDF from %s: %s", url, e)
         return False
+
+
+def _milvus_insert(
+    paper_id: str,
+    chunk_ids: list[int],
+    chunks: list[dict],
+    embeddings: list[list[float]],
+) -> None:
+    """Insert embeddings into Milvus. Silently skips on failure."""
+    try:
+        from core.vector_store import insert_vectors
+
+        texts = [c["text"] for c in chunks]
+        insert_vectors(DEFAULT_USER_ID, paper_id, chunk_ids, texts, embeddings)
+    except Exception as e:
+        logger.warning("Failed to insert vectors into Milvus (non-fatal): %s", e)
 
 
 async def handle_paper_parse(args: dict) -> str:
@@ -203,6 +220,10 @@ async def handle_paper_parse(args: dict) -> str:
                 continue
             insert_citation(conn, resolved_paper_id, target_id)
             citations_added += 1
+
+    # 同步写入 Milvus（如果可用）
+    if embeddings and chunk_ids:
+        _milvus_insert(resolved_paper_id, chunk_ids, all_chunks, embeddings)
 
     # 构建返回结果
     section_summary = []
