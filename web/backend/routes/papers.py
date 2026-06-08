@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from web.backend.db.base import get_db
@@ -38,6 +38,48 @@ def _paper_to_out(paper, is_parsed: bool) -> dict:
     }
 
 
+# ── 无认证端点（放在 {paper_id:path} 之前，避免路径被吞） ──
+
+
+@router.get("/pdf/view")
+async def get_paper_pdf(
+    paper_id: str = Query(..., description="论文 ID"),
+    db: Session = Depends(get_db),
+):
+    """获取论文 PDF（无需认证）"""
+    paper_repo = PaperRepository(db)
+    paper = paper_repo.get_by_id(paper_id)
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    # 1. 本地已下载的 PDF
+    if paper.pdf_path and os.path.isfile(paper.pdf_path):
+        return FileResponse(
+            paper.pdf_path,
+            media_type="application/pdf",
+            filename=f"{paper.title[:80]}.pdf",
+        )
+
+    # 2. 根据论文 ID 构造 PDF URL
+    pid = paper.id
+    if pid.startswith("arxiv:"):
+        arxiv_id = pid.removeprefix("arxiv:")
+        return RedirectResponse(url=f"https://arxiv.org/pdf/{arxiv_id}", status_code=302)
+
+    if pid.startswith("doi:10.48550/arXiv."):
+        arxiv_id = pid.removeprefix("doi:10.48550/arXiv.")
+        return RedirectResponse(url=f"https://arxiv.org/pdf/{arxiv_id}", status_code=302)
+
+    # 3. Semantic Scholar — 跳转到论文页面
+    if paper.url:
+        return RedirectResponse(url=paper.url, status_code=302)
+
+    raise HTTPException(status_code=404, detail="PDF not available")
+
+
+# ── 需要认证的端点 ──
+
+
 @router.get("", response_model=list[PaperOut])
 async def list_papers(
     q: str | None = Query(None, description="搜索关键词"),
@@ -52,7 +94,6 @@ async def list_papers(
 
     papers = paper_repo.get_all(q=q)
 
-    # 获取当前用户已解析的论文 ID 集合
     parsed_ids = set(user_paper_repo.get_user_papers())
 
     result = []
@@ -107,41 +148,3 @@ async def get_paper_chunks(
         {"id": c.id, "section": c.section, "ordinal": c.ordinal, "text": c.text}
         for c in chunks
     ]
-
-
-@router.get("/pdf/view")
-async def get_paper_pdf(
-    paper_id: str = Query(..., description="论文 ID"),
-    db: Session = Depends(get_db),
-):
-    """获取论文 PDF（无需认证，查询参数传 ID 避免路径冲突）"""
-    from fastapi.responses import RedirectResponse
-
-    paper_repo = PaperRepository(db)
-    paper = paper_repo.get_by_id(paper_id)
-    if not paper:
-        raise HTTPException(status_code=404, detail="Paper not found")
-
-    # 1. 本地已下载的 PDF
-    if paper.pdf_path and os.path.isfile(paper.pdf_path):
-        return FileResponse(
-            paper.pdf_path,
-            media_type="application/pdf",
-            filename=f"{paper.title[:80]}.pdf",
-        )
-
-    # 2. 根据论文 ID 构造 PDF URL
-    pid = paper.id
-    if pid.startswith("arxiv:"):
-        arxiv_id = pid.removeprefix("arxiv:")
-        return RedirectResponse(url=f"https://arxiv.org/pdf/{arxiv_id}", status_code=302)
-
-    if pid.startswith("doi:10.48550/arXiv."):
-        arxiv_id = pid.removeprefix("doi:10.48550/arXiv.")
-        return RedirectResponse(url=f"https://arxiv.org/pdf/{arxiv_id}", status_code=302)
-
-    # 3. Semantic Scholar — 跳转到论文页面
-    if paper.url:
-        return RedirectResponse(url=paper.url, status_code=302)
-
-    raise HTTPException(status_code=404, detail="PDF not available")
