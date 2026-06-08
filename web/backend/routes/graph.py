@@ -2,93 +2,60 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
 
-from web.backend.app import agent_service
+from web.backend.db.base import get_db
+from web.backend.db.models import User
+from web.backend.auth.dependencies import get_current_user
+from web.backend.repositories import KnowledgeRepository
 
 logger = logging.getLogger("novare.web.graph")
 router = APIRouter(prefix="/api/graph", tags=["graph"])
 
 
-def _get_graph_path() -> Path:
-    """获取知识图谱 JSON 文件路径"""
-    if agent_service.config:
-        return agent_service.config.data_dir / "knowledge_graph.json"
-    return Path("./data/knowledge_graph.json")
-
-
 @router.get("")
-async def get_graph():
+async def get_graph(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """获取完整知识图谱数据（nodes + edges）"""
-    graph_path = _get_graph_path()
-    if not graph_path.exists():
-        return {"nodes": [], "links": []}
+    repo = KnowledgeRepository(db, user.id)
+    data = repo.get_graph_data()
 
-    try:
-        with open(graph_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to load graph: {e}")
-
-    # 转为前端友好的格式
+    # 前端期望的节点字段（带默认值）
     nodes = []
-    for node in data.get("nodes", []):
+    for n in data["nodes"]:
         nodes.append({
-            "id": node.get("id", ""),
-            "type": node.get("type", "Unknown"),
-            "label": node.get("name") or node.get("title") or node.get("id", ""),
-            "name": node.get("name", ""),
-            "title": node.get("title", ""),
-            "year": node.get("year"),
-            "citation_count": node.get("citation_count", 0),
-            "description": node.get("description", ""),
+            "id": n.get("id", ""),
+            "type": n.get("type", "Unknown"),
+            "label": n.get("label", ""),
+            "name": n.get("name", ""),
+            "title": n.get("title", ""),
+            "year": n.get("year"),
+            "citation_count": n.get("citation_count", 0),
+            "description": n.get("description", ""),
         })
 
+    # 前端期望 links 中是 type 字段，仓库返回的是 relation
     links = []
-    for edge in data.get("edges", []):
+    for l in data["links"]:
         links.append({
-            "source": edge.get("source", ""),
-            "target": edge.get("target", ""),
-            "type": edge.get("type", ""),
+            "source": l.get("source", ""),
+            "target": l.get("target", ""),
+            "type": l.get("relation", ""),
         })
 
     return {"nodes": nodes, "links": links}
 
 
 @router.get("/stats")
-async def get_graph_stats():
+async def get_graph_stats(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """获取图谱统计信息"""
-    graph_path = _get_graph_path()
-    if not graph_path.exists():
-        return {"total_nodes": 0, "total_edges": 0, "node_types": {}, "edge_types": {}}
-
-    try:
-        with open(graph_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to load graph: {e}")
-
-    nodes = data.get("nodes", [])
-    edges = data.get("edges", [])
-
-    node_types = {}
-    for n in nodes:
-        t = n.get("type", "Unknown")
-        node_types[t] = node_types.get(t, 0) + 1
-
-    edge_types = {}
-    for e in edges:
-        t = e.get("type", "Unknown")
-        edge_types[t] = edge_types.get(t, 0) + 1
-
-    return {
-        "total_nodes": len(nodes),
-        "total_edges": len(edges),
-        "node_types": node_types,
-        "edge_types": edge_types,
-    }
+    repo = KnowledgeRepository(db, user.id)
+    return repo.get_stats()

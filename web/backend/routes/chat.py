@@ -6,17 +6,23 @@ import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from web.backend.app import agent_service
+from web.backend.auth.service import decode_access_token
+from web.backend.db.base import SessionLocal
+from web.backend.repositories import SessionRepository
 
 logger = logging.getLogger("novare.web.chat")
 router = APIRouter()
 
 
 @router.websocket("/ws/chat/{session_id}")
-async def ws_chat(websocket: WebSocket, session_id: str):
+async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)):
     """WebSocket 聊天端点
+
+    认证：通过 query param ?token=xxx 传递 JWT。
+    WebSocket 无法使用 Authorization header，因此 token 通过 URL 参数传递。
 
     协议：
       客户端 → 服务端:
@@ -31,15 +37,35 @@ async def ws_chat(websocket: WebSocket, session_id: str):
         {"type": "done"}
         {"type": "error", "message": "..."}
     """
+    # ── 认证 ──
+    user_id_str = decode_access_token(token)
+    if not user_id_str:
+        await websocket.accept()
+        await websocket.close(code=4001, reason="Invalid or expired token")
+        return
+
+    # 验证会话属于当前用户
+    db = SessionLocal()
+    try:
+        from uuid import UUID
+        repo = SessionRepository(db, UUID(user_id_str))
+        session_model = repo.get_by_id(session_id)
+        if not session_model:
+            await websocket.accept()
+            await websocket.close(code=4004, reason="Session not found")
+            return
+    finally:
+        db.close()
+
+    # ── 接受连接 ──
     await websocket.accept()
-    logger.info("WebSocket connected: session=%s", session_id)
+    logger.info("WebSocket connected: session=%s user=%s", session_id, user_id_str)
 
     session = agent_service.load_session(session_id)
     queue: asyncio.Queue = asyncio.Queue()
 
     try:
         while True:
-            # 等待客户端消息
             raw = await websocket.receive_text()
             try:
                 data = json.loads(raw)
