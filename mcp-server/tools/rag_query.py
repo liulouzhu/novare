@@ -79,7 +79,7 @@ def _milvus_search(query_vec: list[float], top_k: int, user_id: str) -> list[dic
     return results
 
 
-async def handle_rag_query(args: dict) -> str:
+async def handle_rag_query(args: dict, user_id: str = None) -> str:
     """RAG 语义检索入口 — Milvus 优先，brute-force fallback"""
     question = args.get("question", "").strip()
     if not question:

@@ -132,6 +132,91 @@ def _save_graph(G: nx.DiGraph) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+# Actions that mutate the graph (need PG sync)
+_MUTATING_ACTIONS = {"add_paper", "add_concept", "add_relation", "extract_from_abstract"}
+
+
+def save_to_pg(user_id: str, graph: nx.DiGraph):
+    """Save NetworkX graph nodes/edges to PostgreSQL (secondary storage)."""
+    if not user_id:
+        return
+    try:
+        from web.backend.db.base import SessionLocal
+        from web.backend.db.models import KnowledgeNode, KnowledgeEdge
+        from uuid import UUID
+        db = SessionLocal()
+        try:
+            uid = UUID(user_id)
+
+            # Build a label->pg_id mapping for edge resolution
+            label_to_id = {}
+
+            # Upsert nodes
+            for node_id, data in graph.nodes(data=True):
+                label = data.get("label") or data.get("name") or data.get("title") or node_id
+                node_type = data.get("type", "concept")
+                existing = db.query(KnowledgeNode).filter(
+                    KnowledgeNode.user_id == uid,
+                    KnowledgeNode.label == label,
+                ).first()
+                if not existing:
+                    pg_node = KnowledgeNode(
+                        user_id=uid,
+                        label=label,
+                        type=node_type,
+                        properties={k: v for k, v in data.items() if k not in ("label", "type", "name", "title")},
+                    )
+                    db.add(pg_node)
+                    db.flush()  # get the generated id
+                    label_to_id[node_id] = pg_node.id
+                else:
+                    existing.type = node_type
+                    existing.properties = {k: v for k, v in data.items() if k not in ("label", "type", "name", "title")}
+                    label_to_id[node_id] = existing.id
+
+            db.commit()
+
+            # Upsert edges
+            for u, v, edata in graph.edges(data=True):
+                source_label = graph.nodes.get(u, {}).get("label") or graph.nodes.get(u, {}).get("name") or graph.nodes.get(u, {}).get("title") or u
+                target_label = graph.nodes.get(v, {}).get("label") or graph.nodes.get(v, {}).get("name") or graph.nodes.get(v, {}).get("title") or v
+                rel_type = edata.get("type", "related_to")
+
+                # Resolve PG node IDs (may need a query if not freshly created)
+                src_id = label_to_id.get(u)
+                tgt_id = label_to_id.get(v)
+                if not src_id:
+                    src_node = db.query(KnowledgeNode).filter(KnowledgeNode.user_id == uid, KnowledgeNode.label == source_label).first()
+                    src_id = src_node.id if src_node else None
+                if not tgt_id:
+                    tgt_node = db.query(KnowledgeNode).filter(KnowledgeNode.user_id == uid, KnowledgeNode.label == target_label).first()
+                    tgt_id = tgt_node.id if tgt_node else None
+
+                if not src_id or not tgt_id:
+                    continue
+
+                existing_edge = db.query(KnowledgeEdge).filter(
+                    KnowledgeEdge.user_id == uid,
+                    KnowledgeEdge.source_node_id == src_id,
+                    KnowledgeEdge.target_node_id == tgt_id,
+                    KnowledgeEdge.relation_type == rel_type,
+                ).first()
+                if not existing_edge:
+                    db.add(KnowledgeEdge(
+                        user_id=uid,
+                        source_node_id=src_id,
+                        target_node_id=tgt_id,
+                        relation_type=rel_type,
+                        properties={k: v for k, v in edata.items() if k != "type"},
+                    ))
+
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("Failed to save KG to PostgreSQL: %s", e)
+
+
 def _action_add_paper(G: nx.DiGraph, args: dict) -> str:
     """添加论文节点及其关系"""
     paper_id = args.get("paper_id")
@@ -470,7 +555,7 @@ ACTION_MAP = {
 }
 
 
-async def handle_knowledge_graph(args: dict) -> str:
+async def handle_knowledge_graph(args: dict, user_id: str = None) -> str:
     """知识图谱工具入口"""
     action = args.get("action")
     if not action or action not in ACTION_MAP:
@@ -478,13 +563,21 @@ async def handle_knowledge_graph(args: dict) -> str:
 
     G = _load_graph()
     handler = ACTION_MAP[action]
-    return handler(G, args)
+    result = handler(G, args)
+
+    # Persist to PostgreSQL after mutating actions
+    if action in _MUTATING_ACTIONS:
+        save_to_pg(user_id, G)
+
+    return result
 
 
-def extract_from_abstract_sync(paper_id: str, entities: list[dict] | None = None) -> str:
+def extract_from_abstract_sync(paper_id: str, entities: list[dict] | None = None, user_id: str = None) -> str:
     """同步版本，供 paper_parse 直接调用"""
     G = _load_graph()
     args = {"paper_id": paper_id}
     if entities:
         args["entities"] = entities
-    return _action_extract_from_abstract(G, args)
+    result = _action_extract_from_abstract(G, args)
+    save_to_pg(user_id, G)
+    return result

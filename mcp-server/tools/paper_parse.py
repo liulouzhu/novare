@@ -32,6 +32,29 @@ PAPERS_DIR = os.path.join(PAPERS_DIR, "papers")
 DEFAULT_USER_ID = os.getenv("RAG_DEFAULT_USER", "default")
 
 
+def associate_user_paper(user_id: str, paper_id: str):
+    """Create a user-paper association in PostgreSQL after parsing."""
+    if not user_id:
+        return
+    try:
+        from web.backend.db.base import SessionLocal
+        from web.backend.db.models import UserPaper
+        from uuid import UUID
+        db = SessionLocal()
+        try:
+            existing = db.query(UserPaper).filter(
+                UserPaper.user_id == UUID(user_id),
+                UserPaper.paper_id == paper_id,
+            ).first()
+            if not existing:
+                db.add(UserPaper(user_id=UUID(user_id), paper_id=paper_id))
+                db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("Failed to associate user-paper: %s", e)
+
+
 async def _download_pdf(url: str, dest_path: str) -> bool:
     """下载 PDF 文件"""
     try:
@@ -63,7 +86,7 @@ def _milvus_insert(
         logger.warning("Failed to insert vectors into Milvus (non-fatal): %s", e)
 
 
-async def handle_paper_parse(args: dict) -> str:
+async def handle_paper_parse(args: dict, user_id: str = None) -> str:
     """解析论文 PDF"""
     paper_id = args.get("paper_id")
     pdf_url = args.get("pdf_url")
@@ -225,6 +248,10 @@ async def handle_paper_parse(args: dict) -> str:
     if embeddings and chunk_ids:
         _milvus_insert(resolved_paper_id, chunk_ids, all_chunks, embeddings)
 
+    # 关联用户与论文（PostgreSQL）
+    if resolved_paper_id:
+        associate_user_paper(user_id, resolved_paper_id)
+
     # 构建返回结果
     section_summary = []
     for sec in sections:
@@ -236,7 +263,7 @@ async def handle_paper_parse(args: dict) -> str:
     if resolved_paper_id:
         try:
             from tools.knowledge_graph import extract_from_abstract_sync
-            kg_result = extract_from_abstract_sync(resolved_paper_id)
+            kg_result = extract_from_abstract_sync(resolved_paper_id, user_id=user_id)
             logger.info("Knowledge graph updated for %s", resolved_paper_id)
         except Exception as e:
             logger.warning("Knowledge graph extraction failed: %s", e)

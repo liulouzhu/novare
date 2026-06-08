@@ -147,6 +147,9 @@ async def list_tools() -> list[Tool]:
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     logger.info("Tool call: %s(%s)", name, arguments)
 
+    # Extract user_id context injected by the web backend
+    user_id = arguments.pop("_user_id", None)
+
     if name == "echo":
         return [TextContent(type="text", text=arguments.get("message", ""))]
 
@@ -157,22 +160,22 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     if name == "paper_parse":
         from tools.paper_parse import handle_paper_parse
-        result = await handle_paper_parse(arguments)
+        result = await handle_paper_parse(arguments, user_id=user_id)
         return [TextContent(type="text", text=result)]
 
     if name == "rag_query":
         from tools.rag_query import handle_rag_query
-        result = await handle_rag_query(arguments)
+        result = await handle_rag_query(arguments, user_id=user_id)
         return [TextContent(type="text", text=result)]
 
     if name == "knowledge_graph":
         from tools.knowledge_graph import handle_knowledge_graph
-        result = await handle_knowledge_graph(arguments)
+        result = await handle_knowledge_graph(arguments, user_id=user_id)
         return [TextContent(type="text", text=result)]
 
     if name == "code_execute":
         from tools.code_execute import handle_code_execute
-        result = await handle_code_execute(arguments)
+        result = await handle_code_execute(arguments, user_id=user_id)
         return [TextContent(type="text", text=result)]
 
     return [TextContent(type="text", text=f"Unknown tool: {name}")]

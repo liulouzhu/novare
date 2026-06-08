@@ -12,6 +12,28 @@ from core.database import get_connection, upsert_paper
 
 logger = logging.getLogger("research-server.paper_search")
 
+
+def upsert_paper_pg(paper_data: dict):
+    """Save or update a paper in PostgreSQL (secondary storage)."""
+    try:
+        from web.backend.db.base import SessionLocal
+        from web.backend.db.models import Paper
+        db = SessionLocal()
+        try:
+            paper = db.query(Paper).filter(Paper.id == paper_data["id"]).first()
+            if paper:
+                for k, v in paper_data.items():
+                    if k != "id":
+                        setattr(paper, k, v)
+            else:
+                paper = Paper(**paper_data)
+                db.add(paper)
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("Failed to save paper to PostgreSQL: %s", e)
+
 # Semantic Scholar API
 S2_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 S2_FIELDS = "title,authors,abstract,year,externalIds,citationCount,openAccessPdf"
@@ -283,6 +305,10 @@ async def handle_paper_search(args: dict) -> str:
                     upsert_paper(conn, paper)
         except Exception as e:
             logger.warning("Failed to save papers to DB: %s", e)
+
+        # 同步写入 PostgreSQL（secondary storage）
+        for paper in merged:
+            upsert_paper_pg(paper)
 
     # 有结果就返回结果
     if merged:
