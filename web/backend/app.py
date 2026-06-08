@@ -56,12 +56,14 @@ app.add_middleware(
 )
 
 # 注册路由
+from web.backend.auth.router import router as auth_router  # noqa: E402
 from web.backend.routes.chat import router as chat_router  # noqa: E402
 from web.backend.routes.graph import router as graph_router  # noqa: E402
 from web.backend.routes.papers import router as papers_router  # noqa: E402
 from web.backend.routes.sessions import router as sessions_router  # noqa: E402
 from web.backend.routes.upload import router as upload_router  # noqa: E402
 
+app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(sessions_router)
 app.include_router(papers_router)
