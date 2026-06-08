@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { useWebSocket } from './useWebSocket'
 import { useChatStore } from '@/stores/chatStore'
+import { useSessionStore } from '@/stores/sessionStore'
 import { type ServerEvent, type ToolCallState, type Message } from '@/lib/ws'
 import { generateId } from '@/lib/utils'
 import { fetchSession } from '@/lib/api'
@@ -155,6 +156,8 @@ export function useChat(sessionId: string) {
           assistantMsgId.current = null
         }
         setStreaming(false)
+        // 刷新会话列表（新会话可能有了消息）
+        useSessionStore.getState().loadSessions()
         break
 
       case 'error':
@@ -164,6 +167,7 @@ export function useChat(sessionId: string) {
           assistantMsgId.current = null
         }
         setStreaming(false)
+        useSessionStore.getState().loadSessions()
         break
     }
   }, [appendText, addToolCall, updateToolCall, finishMessage, setStreaming])
