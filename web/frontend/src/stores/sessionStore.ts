@@ -1,7 +1,7 @@
 /** 会话列表状态管理 */
 
 import { create } from 'zustand'
-import { type SessionMeta, fetchSessions, createSession as apiCreate, deleteSession as apiDelete, fetchSession } from '@/lib/api'
+import { type SessionMeta, fetchSessions, createSession as apiCreate, deleteSession as apiDelete } from '@/lib/api'
 
 interface SessionStore {
   sessions: SessionMeta[]
@@ -11,6 +11,7 @@ interface SessionStore {
   loadSessions: () => Promise<void>
   createSession: () => Promise<string>
   switchSession: (id: string) => void
+  updateSessionTitle: (id: string, title: string) => void
   deleteSession: (id: string) => Promise<void>
 }
 
@@ -37,6 +38,26 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   switchSession: (id: string) => {
     set({ currentId: id })
+  },
+
+  updateSessionTitle: (id: string, title: string) => {
+    const normalized = title.trim().replace(/\s+/g, ' ')
+    if (!normalized) return
+
+    const nextTitle = normalized.length > 60 ? `${normalized.slice(0, 60)}...` : normalized
+    set((s) => ({
+      sessions: s.sessions.map((session) =>
+        session.session_id === id
+          ? {
+              ...session,
+              title: session.title === '新会话' || session.title === 'New Chat' || !session.title
+                ? nextTitle
+                : session.title,
+              message_count: Math.max(session.message_count, 1),
+            }
+          : session,
+      ),
+    }))
   },
 
   deleteSession: async (id: string) => {

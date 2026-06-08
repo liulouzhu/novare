@@ -19,6 +19,7 @@ export function ReferencePanel({ sessionId }: Props) {
     setLoading(true)
     fetchPapers()
       .then(setPapers)
+      .catch((e) => console.error('Failed to load papers:', e))
       .finally(() => setLoading(false))
   }, [sessionId])
 

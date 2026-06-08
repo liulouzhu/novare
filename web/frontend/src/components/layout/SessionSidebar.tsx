@@ -4,7 +4,8 @@ import { useEffect, useState } from 'react'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useThemeStore } from '@/stores/themeStore'
 import { cn } from '@/lib/utils'
-import { Plus, Trash2, MessageSquare, Loader2, Sun, Moon, X, FileText, Network, ChevronDown, ChevronRight } from 'lucide-react'
+import { Plus, Trash2, MessageSquare, Loader2, Sun, Moon, X, FileText, Network, ChevronDown, ChevronRight, LogOut } from 'lucide-react'
+import { useAuthStore } from '@/stores/authStore'
 
 export type PageKey = 'chat' | 'papers' | 'graph'
 
@@ -16,6 +17,7 @@ interface Props {
 export function SessionSidebar({ activePage, onNavigate }: Props) {
   const { sessions, currentId, loading, loadSessions, createSession, switchSession, deleteSession } = useSessionStore()
   const { resolved, setTheme } = useThemeStore()
+  const { user, logout } = useAuthStore()
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [sessionsExpanded, setSessionsExpanded] = useState(true)
 
@@ -153,6 +155,26 @@ export function SessionSidebar({ activePage, onNavigate }: Props) {
             )}
           </div>
         )}
+      </div>
+
+      {/* 用户信息与登出 */}
+      <div className="p-3 border-t flex items-center gap-2" style={{ borderColor: 'var(--border-color)' }}>
+        <div
+          className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium shrink-0"
+          style={{ backgroundColor: 'var(--accent-light)', color: 'var(--accent)' }}
+        >
+          {user?.username?.[0]?.toUpperCase() || '?'}
+        </div>
+        <span className="flex-1 truncate text-xs" style={{ color: 'var(--text-primary)' }}>
+          {user?.username || '未登录'}
+        </span>
+        <button
+          onClick={logout}
+          className="p-1.5 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+          title="退出登录"
+        >
+          <LogOut size={14} style={{ color: 'var(--text-secondary)' }} />
+        </button>
       </div>
 
       {/* 删除确认弹窗 */}

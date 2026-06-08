@@ -35,6 +35,7 @@ class AgentLoop:
         user_input: str,
         on_text: Callable[[str], None] | None = None,
         on_tool: Callable[[str, str, dict, str | None, float | None], None] | None = None,
+        tool_context: dict | None = None,
     ) -> str:
         """执行一轮对话：用户输入 → LLM（流式） → 工具循环 → 最终回答
 
@@ -73,7 +74,7 @@ class AgentLoop:
                 if on_tool:
                     on_tool("start", tc.name, tc.arguments, None, None)
                 t0 = time.monotonic()
-                result = await self.tool_registry.execute(tc.name, tc.arguments)
+                result = await self.tool_registry.execute(tc.name, tc.arguments, tool_context=tool_context)
                 elapsed = time.monotonic() - t0
                 # 检测工具执行错误
                 is_error = result.startswith("Error") or result.startswith("错误") or result.startswith("搜索失败")

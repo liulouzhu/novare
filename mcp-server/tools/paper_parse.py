@@ -146,6 +146,7 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
         if resolved_paper_id:
             existing_chunks = get_chunks_by_paper(conn, resolved_paper_id)
             if existing_chunks:
+                associate_user_paper(user_id, resolved_paper_id)
                 return (
                     f"论文 {resolved_paper_id} 已解析（{len(existing_chunks)} 个分块）。"
                     f"如需重新解析，请先删除相关数据。"

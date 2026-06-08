@@ -184,6 +184,7 @@ class AgentService:
                 session, user_input,
                 on_text=on_text,
                 on_tool=on_tool,
+                tool_context={"user_id": user_id} if user_id else None,
             )
 
             # ── 持久化到 PostgreSQL（仅当 user_id 存在时） ──
@@ -194,8 +195,11 @@ class AgentService:
                     try:
                         # 确保 DB session 存在
                         session_repo = SessionRepository(db, user_uuid)
-                        if not session_repo.get_by_id(session.session_id):
-                            session_repo.create(session.session_id, title="新会话")
+                        session_model = session_repo.get_by_id(session.session_id)
+                        if not session_model:
+                            session_repo.create(session.session_id, title=_extract_title_from_text(user_input))
+                        elif session_model.title in ("", "新会话", "New Chat"):
+                            session_repo.update_title(session.session_id, _extract_title_from_text(user_input))
 
                         # 增量追加本轮新消息到 DB
                         new_messages = session.messages[msgs_before:]
@@ -236,7 +240,11 @@ class AgentService:
 def _make_mcp_handler(client: McpClient, tool_name: str):
     """创建 MCP 工具的 handler 闭包，调用 MCP client 的 call_tool"""
     async def handler(arguments: dict, **kwargs) -> str:
-        return await client.call_tool(tool_name, arguments)
+        payload = dict(arguments)
+        user_id = kwargs.get("user_id")
+        if user_id:
+            payload["_user_id"] = user_id
+        return await client.call_tool(tool_name, payload)
     return handler
 
 
@@ -244,9 +252,14 @@ def _extract_title(messages: list[dict]) -> str:
     """从第一条用户消息提取标题"""
     for msg in messages:
         if msg.get("role") == "user":
-            content = msg.get("content", "")
-            return content[:60].replace("\n", " ") + ("..." if len(content) > 60 else "")
+            return _extract_title_from_text(msg.get("content", ""))
     return "新会话"
+
+
+def _extract_title_from_text(content: str) -> str:
+    """从用户输入提取侧栏标题"""
+    text = content.strip().replace("\n", " ")
+    return text[:60] + ("..." if len(text) > 60 else "") if text else "新会话"
 
 
 def _session_updated_time(session_id: str, workspace: Path) -> str:

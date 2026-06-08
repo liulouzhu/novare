@@ -128,7 +128,7 @@ class ToolRegistry:
     def to_openai_tools(self) -> list[dict]:
         return [t.to_openai_tool() for t in self._tools.values()]
 
-    async def execute(self, name: str, arguments: dict) -> str:
+    async def execute(self, name: str, arguments: dict, tool_context: dict | None = None) -> str:
         tool = self._tools.get(name)
         if not tool:
             return f"Error: Unknown tool '{name}'"
@@ -137,7 +137,10 @@ class ToolRegistry:
             return f"Error: Tool '{name}' has no handler (MCP tool not connected)"
 
         try:
-            result = await tool.handler(arguments, workspace=self.workspace)
+            kwargs = {"workspace": self.workspace}
+            if tool.source.startswith("mcp:") and tool_context:
+                kwargs.update(tool_context)
+            result = await tool.handler(arguments, **kwargs)
             return result
         except Exception as e:
             logger.exception("Tool execution error: %s", name)

@@ -179,6 +179,7 @@ export function useChat(sessionId: string) {
 
     // 添加用户消息
     addUserMessage(sessionId, content)
+    useSessionStore.getState().updateSessionTitle(sessionId, content)
 
     // 创建 assistant 消息占位
     assistantMsgId.current = startAssistantMessage(sessionId)

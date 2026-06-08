@@ -7,10 +7,11 @@ import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from web.backend.db.base import get_db
-from web.backend.db.models import User
+from web.backend.db.models import User, MessageModel
 from web.backend.auth.dependencies import get_current_user
 from web.backend.repositories import SessionRepository, MessageRepository
 from web.backend.models import SessionDetail, SessionMeta
@@ -27,11 +28,24 @@ async def list_sessions(
     """列出当前用户的所有会话"""
     repo = SessionRepository(db, user.id)
     sessions = repo.list_all()
+
+    # 批量查询每个会话的消息数
+    session_ids = [s.id for s in sessions]
+    if session_ids:
+        counts = dict(
+            db.query(MessageModel.session_id, func.count(MessageModel.id))
+            .filter(MessageModel.session_id.in_(session_ids))
+            .group_by(MessageModel.session_id)
+            .all()
+        )
+    else:
+        counts = {}
+
     return [
         SessionMeta(
             session_id=s.id,
             title=s.title or "",
-            message_count=0,  # lightweight list: don't query message count
+            message_count=counts.get(s.id, 0),
             updated_at=s.updated_at.isoformat() if s.updated_at else "",
         )
         for s in sessions

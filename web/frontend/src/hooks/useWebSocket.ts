@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { type ServerEvent } from '@/lib/ws'
+import { useAuthStore } from '@/stores/authStore'
 
 interface UseWebSocketOptions {
   sessionId: string
@@ -18,7 +19,8 @@ export function useWebSocket({ sessionId, onEvent }: UseWebSocketOptions) {
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const host = window.location.host
-    const url = `${protocol}//${host}/ws/chat/${sessionId}`
+    const token = useAuthStore.getState().token
+    const url = `${protocol}//${host}/ws/chat/${sessionId}?token=${encodeURIComponent(token || '')}`
 
     const ws = new WebSocket(url)
     wsRef.current = ws

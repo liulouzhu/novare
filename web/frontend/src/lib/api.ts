@@ -1,6 +1,19 @@
 /** API 客户端 */
 
+import { useAuthStore } from '@/stores/authStore'
+
 const BASE = ''  // Vite proxy handles /api → localhost:8000
+
+function authHeaders(): HeadersInit {
+  const token = useAuthStore.getState().token
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+function handleAuthError(res: Response) {
+  if (res.status === 401) {
+    useAuthStore.getState().logout()
+  }
+}
 
 export interface SessionMeta {
   session_id: string
@@ -38,29 +51,61 @@ export interface Paper {
   created_at: string | null
 }
 
+// ── Auth ──
+
+export async function register(username: string, email: string, password: string) {
+  const res = await fetch(`${BASE}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, email, password }),
+  })
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(err.detail || 'Registration failed')
+  }
+  return res.json()
+}
+
+export async function login(username: string, password: string): Promise<{ access_token: string }> {
+  const res = await fetch(`${BASE}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  })
+  if (!res.ok) throw new Error('Invalid username or password')
+  return res.json()
+}
+
+export async function fetchMe(token?: string): Promise<{ id: string; username: string; email: string }> {
+  const hdrs: HeadersInit = token ? { Authorization: `Bearer ${token}` } : authHeaders()
+  const res = await fetch(`${BASE}/api/auth/me`, { headers: hdrs })
+  if (!res.ok) throw new Error('Not authenticated')
+  return res.json()
+}
+
 // ── Sessions ──
 
 export async function fetchSessions(): Promise<SessionMeta[]> {
-  const res = await fetch(`${BASE}/api/sessions`)
-  if (!res.ok) throw new Error('Failed to fetch sessions')
+  const res = await fetch(`${BASE}/api/sessions`, { headers: authHeaders() })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to fetch sessions') }
   return res.json()
 }
 
 export async function createSession(): Promise<SessionMeta> {
-  const res = await fetch(`${BASE}/api/sessions`, { method: 'POST' })
-  if (!res.ok) throw new Error('Failed to create session')
+  const res = await fetch(`${BASE}/api/sessions`, { method: 'POST', headers: authHeaders() })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to create session') }
   return res.json()
 }
 
 export async function fetchSession(sessionId: string): Promise<SessionDetail> {
-  const res = await fetch(`${BASE}/api/sessions/${sessionId}`)
-  if (!res.ok) throw new Error('Failed to fetch session')
+  const res = await fetch(`${BASE}/api/sessions/${sessionId}`, { headers: authHeaders() })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to fetch session') }
   return res.json()
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/sessions/${sessionId}`, { method: 'DELETE' })
-  if (!res.ok) throw new Error('Failed to delete session')
+  const res = await fetch(`${BASE}/api/sessions/${sessionId}`, { method: 'DELETE', headers: authHeaders() })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to delete session') }
 }
 
 // ── Papers ──
@@ -70,14 +115,14 @@ export async function fetchPapers(params?: { q?: string; is_parsed?: boolean }):
   if (params?.q) searchParams.set('q', params.q)
   if (params?.is_parsed !== undefined) searchParams.set('is_parsed', String(params.is_parsed))
   const qs = searchParams.toString()
-  const res = await fetch(`${BASE}/api/papers${qs ? `?${qs}` : ''}`)
-  if (!res.ok) throw new Error('Failed to fetch papers')
+  const res = await fetch(`${BASE}/api/papers${qs ? `?${qs}` : ''}`, { headers: authHeaders() })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to fetch papers') }
   return res.json()
 }
 
 export async function fetchPaper(paperId: string): Promise<Paper> {
-  const res = await fetch(`${BASE}/api/papers/${encodeURIComponent(paperId)}`)
-  if (!res.ok) throw new Error('Failed to fetch paper')
+  const res = await fetch(`${BASE}/api/papers/${encodeURIComponent(paperId)}`, { headers: authHeaders() })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to fetch paper') }
   return res.json()
 }
 
@@ -86,8 +131,8 @@ export async function fetchPaper(paperId: string): Promise<Paper> {
 export async function uploadFile(file: File): Promise<{ filename: string; file_path: string; message: string }> {
   const form = new FormData()
   form.append('file', file)
-  const res = await fetch(`${BASE}/api/upload`, { method: 'POST', body: form })
-  if (!res.ok) throw new Error('Failed to upload file')
+  const res = await fetch(`${BASE}/api/upload`, { method: 'POST', body: form, headers: authHeaders() })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to upload file') }
   return res.json()
 }
 
@@ -123,13 +168,13 @@ export interface GraphStats {
 }
 
 export async function fetchGraph(): Promise<GraphData> {
-  const res = await fetch(`${BASE}/api/graph`)
-  if (!res.ok) throw new Error('Failed to fetch graph')
+  const res = await fetch(`${BASE}/api/graph`, { headers: authHeaders() })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to fetch graph') }
   return res.json()
 }
 
 export async function fetchGraphStats(): Promise<GraphStats> {
-  const res = await fetch(`${BASE}/api/graph/stats`)
-  if (!res.ok) throw new Error('Failed to fetch graph stats')
+  const res = await fetch(`${BASE}/api/graph/stats`, { headers: authHeaders() })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to fetch graph stats') }
   return res.json()
 }
