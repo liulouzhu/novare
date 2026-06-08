@@ -95,6 +95,16 @@ class NovareConfig:
         return cfg
 
 
+def get_user_workspace(user_id: str) -> str:
+    """Return isolated workspace path for a user."""
+    import os
+    base = os.getenv("NOVARE_WORKSPACE", "workspace")
+    path = os.path.join(base, user_id)
+    os.makedirs(os.path.join(path, ".novare", "sessions"), exist_ok=True)
+    os.makedirs(os.path.join(path, "uploads"), exist_ok=True)
+    return path
+
+
 def _default_system_prompt(workspace: Path) -> str:
     return f"""你是 Novare 智能科研助手。
 

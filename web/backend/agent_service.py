@@ -16,7 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from uuid import UUID
 
 from novare.agent_loop import AgentLoop  # noqa: E402
-from novare.config import NovareConfig  # noqa: E402
+from novare.config import NovareConfig, get_user_workspace  # noqa: E402
 from novare.llm_client import LLMClient  # noqa: E402
 from novare.mcp_client import McpClient  # noqa: E402
 from novare.session import Session, JsonlSessionStore  # noqa: E402
@@ -92,38 +92,46 @@ class AgentService:
             await self.llm_client.close()
         logger.info("AgentService shut down")
 
-    def load_session(self, session_id: str) -> Session:
-        """加载或创建会话"""
-        try:
-            return Session.load(session_id, workspace=self.config.workspace)
-        except FileNotFoundError:
-            return Session(session_id=session_id, workspace=self.config.workspace)
+    def _workspace_for(self, user_id: str | None = None) -> Path:
+        """Return workspace path — user-specific when user_id provided."""
+        if user_id:
+            return Path(get_user_workspace(user_id))
+        return self.config.workspace
 
-    def list_sessions(self) -> list[dict]:
+    def load_session(self, session_id: str, user_id: str | None = None) -> Session:
+        """加载或创建会话"""
+        ws = self._workspace_for(user_id)
+        try:
+            return Session.load(session_id, workspace=ws)
+        except FileNotFoundError:
+            return Session(session_id=session_id, workspace=ws)
+
+    def list_sessions(self, user_id: str | None = None) -> list[dict]:
         """列出所有会话（简略信息）"""
-        sessions = Session.list_sessions(workspace=self.config.workspace)
+        ws = self._workspace_for(user_id)
+        sessions = Session.list_sessions(workspace=ws)
         result = []
         for sid in sessions:
             try:
-                session = Session.load(sid, workspace=self.config.workspace)
+                session = Session.load(sid, workspace=ws)
                 title = _extract_title(session.messages)
                 result.append({
                     "session_id": sid,
                     "title": title,
                     "message_count": len(session.messages),
-                    "updated_at": _session_updated_time(sid, self.config.workspace),
+                    "updated_at": _session_updated_time(sid, ws),
                 })
             except Exception:
                 result.append({"session_id": sid, "title": sid, "message_count": 0, "updated_at": ""})
         return result
 
-    def create_session(self) -> Session:
+    def create_session(self, user_id: str | None = None) -> Session:
         """创建新会话"""
-        return Session(workspace=self.config.workspace)
+        return Session(workspace=self._workspace_for(user_id))
 
-    def delete_session(self, session_id: str):
+    def delete_session(self, session_id: str, user_id: str | None = None):
         """删除会话"""
-        session = Session(session_id=session_id, workspace=self.config.workspace)
+        session = Session(session_id=session_id, workspace=self._workspace_for(user_id))
         session.delete()
 
     async def run_turn(

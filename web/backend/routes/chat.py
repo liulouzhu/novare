@@ -61,7 +61,7 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
     await websocket.accept()
     logger.info("WebSocket connected: session=%s user=%s", session_id, user_id_str)
 
-    session = agent_service.load_session(session_id)
+    session = agent_service.load_session(session_id, user_id=user_id_str)
     queue: asyncio.Queue = asyncio.Queue()
 
     try:

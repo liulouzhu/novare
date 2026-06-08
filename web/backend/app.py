@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from web.backend.agent_service import AgentService  # noqa: E402
+from web.backend.db.base import Base, engine  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -29,6 +30,21 @@ async def lifespan(app: FastAPI):
     """应用启动/关闭生命周期"""
     # 切换工作目录到项目根目录（.env 在此）
     os.chdir(PROJECT_ROOT)
+
+    # 确保数据库表存在
+    import web.backend.db.models  # noqa: F401 — register all models with Base
+    Base.metadata.create_all(bind=engine)
+    logging.getLogger("novare.web").info("DB tables ensured")
+
+    # 尝试连接 Milvus（可选，失败时优雅降级）
+    try:
+        from mcp_server.core.vector_store import connect_milvus, ensure_collection
+        connect_milvus()
+        ensure_collection()
+        logging.getLogger("novare.web").info("Milvus connected and collection ensured")
+    except Exception:
+        logging.getLogger("novare.web").warning("Milvus unavailable (non-fatal)", exc_info=True)
+
     await agent_service.initialize()
     try:
         yield
