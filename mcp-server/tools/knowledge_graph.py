@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 from typing import Optional
 
 import networkx as nx
@@ -12,6 +13,103 @@ from core.database import get_connection, get_paper
 logger = logging.getLogger("research-server.knowledge_graph")
 
 KG_PATH = os.path.join(os.environ.get("RESEARCH_DATA_DIR", "./data"), "knowledge_graph.json")
+
+# ── 实体提取词典 ────────────────────────────────────────────────────────────
+# 每个类别：(canonical_name, [alias1, alias2, ...])
+# 匹配时忽略大小写，匹配到后统一使用 canonical_name
+
+METHODS = [
+    ("Transformer", ["transformer", "self-attention", "self attention"]),
+    ("CNN", ["cnn", "convolutional neural network", "convolutional network"]),
+    ("RNN", ["rnn", "recurrent neural network"]),
+    ("LSTM", ["lstm", "long short-term memory"]),
+    ("GAN", ["gan", "generative adversarial network"]),
+    ("Autoencoder", ["autoencoder", "auto-encoder", "vae", "variational autoencoder"]),
+    ("Graph Neural Network", ["gnn", "graph neural network", "gcn", "graph convolutional"]),
+    ("Attention Mechanism", ["attention mechanism", "attention model", "multi-head attention", "multihead attention"]),
+    ("Contrastive Learning", ["contrastive learning", "contrastive loss", "simclr", "moco"]),
+    ("Self-Supervised Learning", ["self-supervised learning", "self supervised learning"]),
+    ("Transfer Learning", ["transfer learning", "pre-trained", "pretrained", "fine-tuning", "finetuning"]),
+    ("Few-Shot Learning", ["few-shot learning", "few shot learning", "meta-learning", "meta learning"]),
+    ("Reinforcement Learning", ["reinforcement learning", "rl", "policy gradient", "q-learning"]),
+    ("Object Detection", ["object detection", "yolo", "faster r-cnn", "ssd"]),
+    ("Segmentation", ["segmentation", "semantic segmentation", "instance segmentation", "panoptic segmentation"]),
+    ("Multiple Instance Learning", ["multiple instance learning", "mil"]),
+    ("Knowledge Distillation", ["knowledge distillation", "teacher-student", "teacher student"]),
+    ("Diffusion Model", ["diffusion model", "diffusion", "ddpm", "score-based"]),
+    ("Vision-Language Model", ["vision-language", "vision language", "clip", "blip"]),
+    ("Large Language Model", ["large language model", "llm", "gpt", "bert", "llama"]),
+    ("Vision Transformer", ["vision transformer", "vit", "swin transformer", "deit"]),
+    ("Optical Flow", ["optical flow", "motion estimation"]),
+    ("3D Convolution", ["3d convolution", "3d cnn", "c3d", "i3d"]),
+    ("Temporal Modeling", ["temporal modeling", "temporal convolution", "temporal attention"]),
+    ("Anomaly Scoring", ["anomaly scoring", "anomaly score", "abnormality score"]),
+    ("Future Frame Prediction", ["future frame prediction", "frame prediction"]),
+]
+
+DATASETS = [
+    ("UCF-Crime", ["ucf-crime", "ucf crime"]),
+    ("ShanghaiTech", ["shanghaitech", "shanghai tech"]),
+    ("Pedestrian", ["ped2", "avenue", "pedestrian"]),
+    ("Kinetics", ["kinetics", "kinetics-400", "kinetics-600"]),
+    ("ImageNet", ["imagenet", "ilsvrc"]),
+    ("COCO", ["coco", "ms-coco", "ms coco"]),
+    ("ActivityNet", ["activitynet", "activity net"]),
+    ("THUMOS", ["thumos"]),
+    ("MNIST", ["mnist"]),
+    ("CIFAR", ["cifar", "cifar-10", "cifar-100"]),
+    ("Cityscapes", ["cityscapes"]),
+    ("ADE20K", ["ade20k"]),
+    ("VOC", ["pascal voc", "voc2007", "voc2012"]),
+    ("HMDB", ["hmdb", "hmdb51"]),
+    ("UCF101", ["ucf101", "ucf-101"]),
+    ("Something-Something", ["something-something", "something something"]),
+    ("Sports-1M", ["sports-1m"]),
+    ("YouTube-BoundingBoxes", ["youtube-bounding"]),
+]
+
+TASKS = [
+    ("Video Anomaly Detection", ["video anomaly detection", "video anomalous", "vad"]),
+    ("Anomaly Detection", ["anomaly detection", "anomaly detection", "outlier detection", "abnormal event detection"]),
+    ("Object Detection", ["object detection", "object recognition"]),
+    ("Image Classification", ["image classification", "visual recognition"]),
+    ("Action Recognition", ["action recognition", "activity recognition", "temporal action detection"]),
+    ("Semantic Segmentation", ["semantic segmentation"]),
+    ("Image Generation", ["image generation", "image synthesis"]),
+    ("Text-to-Image", ["text-to-image", "text to image"]),
+    ("Object Tracking", ["object tracking", "multi-object tracking", "mot"]),
+    ("Pose Estimation", ["pose estimation", "human pose"]),
+    ("Scene Understanding", ["scene understanding", "scene recognition"]),
+    ("Representation Learning", ["representation learning", "feature learning"]),
+    ("Domain Adaptation", ["domain adaptation", "domain generalization"]),
+    ("Weakly Supervised Learning", ["weakly supervised", "weak supervision", "semi-supervised"]),
+    ("Zero-Shot Learning", ["zero-shot learning", "zero shot"]),
+    ("Video Understanding", ["video understanding", "video recognition"]),
+    ("Person Re-Identification", ["person re-identification", "re-id", "reid"]),
+    ("Change Detection", ["change detection"]),
+    ("Medical Image Analysis", ["medical image", "medical imaging"]),
+]
+
+
+def _extract_entities_from_text(text: str) -> list[dict]:
+    """从文本中提取实体（方法/数据集/任务），返回 [{name, type}]"""
+    text_lower = text.lower()
+    found = []
+    seen = set()
+
+    for category, dictionary in [("Method", METHODS), ("Dataset", DATASETS), ("Task", TASKS)]:
+        for canonical, aliases in dictionary:
+            if canonical.lower() in seen:
+                continue
+            for alias in aliases:
+                # 用 word boundary 匹配，避免子串误匹配
+                pattern = r'\b' + re.escape(alias) + r'\b'
+                if re.search(pattern, text_lower):
+                    found.append({"name": canonical, "type": category})
+                    seen.add(canonical.lower())
+                    break
+
+    return found
 
 
 def _load_graph() -> nx.DiGraph:
@@ -193,6 +291,118 @@ def _action_stats(G: nx.DiGraph, args: dict) -> str:
     return _format_graph_stats(G)
 
 
+def _action_extract_from_abstract(G: nx.DiGraph, args: dict) -> str:
+    """从论文摘要中自动提取实体并构建知识图谱
+
+    支持两种模式：
+    1. 自动模式：提供 paper_id，从数据库读取摘要，用词典匹配提取
+    2. 手动模式：提供 paper_id + entities 列表，由 LLM 提供的实体
+    """
+    paper_id = args.get("paper_id")
+    if not paper_id:
+        return "错误：请提供 paper_id。"
+
+    # 确保论文节点存在
+    with get_connection() as conn:
+        paper = get_paper(conn, paper_id)
+
+    if not paper:
+        return f"错误：论文 {paper_id} 不存在于数据库中。请先使用 paper_search 搜索。"
+
+    # 确保 Paper 节点在图谱中
+    if not G.has_node(paper_id):
+        G.add_node(paper_id, type="Paper", title=paper.get("title", ""),
+                   year=paper.get("year"))
+
+    # 作者节点
+    authors = json.loads(paper.get("authors", "[]")) if isinstance(paper.get("authors"), str) else paper.get("authors", [])
+    for author_name in authors:
+        if not author_name:
+            continue
+        author_id = f"author:{author_name.strip().lower().replace(' ', '_')}"
+        if not G.has_node(author_id):
+            G.add_node(author_id, type="Author", name=author_name.strip())
+        if not G.has_edge(paper_id, author_id):
+            G.add_edge(paper_id, author_id, type="authored_by")
+
+    # 获取实体列表：优先使用手动提供的 entities，否则从摘要自动提取
+    manual_entities = args.get("entities", [])
+    if manual_entities:
+        entities = [
+            {"name": e["name"], "type": e.get("type", "Concept")}
+            for e in manual_entities if e.get("name")
+        ]
+        source = "手动提供"
+    else:
+        abstract = paper.get("abstract", "")
+        if not abstract:
+            # 尝试从已解析的分块中获取摘要
+            with get_connection() as conn:
+                chunks = conn.execute(
+                    "SELECT text FROM chunks WHERE paper_id=? AND section LIKE '%abstract%' ORDER BY ordinal LIMIT 1",
+                    (paper_id,)
+                ).fetchall()
+            if chunks:
+                abstract = chunks[0]["text"]
+        if not abstract:
+            _save_graph(G)
+            return f"论文 {paper_id} 没有摘要，无法自动提取实体。请手动提供 entities 参数。"
+        entities = _extract_entities_from_text(abstract)
+        source = "摘要自动提取"
+
+    if not entities:
+        _save_graph(G)
+        return f"未从论文 {paper_id} 中提取到已知实体。\n图谱总计: {G.number_of_nodes()} 节点, {G.number_of_edges()} 边"
+
+    # 关系映射：实体类型 → 论文到实体的关系名
+    RELATION_MAP = {
+        "Method": "uses_method",
+        "Dataset": "evaluated_on",
+        "Task": "addresses_task",
+    }
+
+    added = []
+    for ent in entities:
+        name = ent["name"]
+        etype = ent["type"]
+        concept_id = f"concept:{name.lower().replace(' ', '_')}"
+
+        # 创建概念节点
+        if not G.has_node(concept_id):
+            G.add_node(concept_id, type=etype, name=name)
+        elif G.nodes[concept_id].get("type") == "Unknown":
+            G.nodes[concept_id]["type"] = etype
+            G.nodes[concept_id]["name"] = name
+
+        # 创建关系
+        relation = RELATION_MAP.get(etype, "related_to")
+        if not G.has_edge(paper_id, concept_id):
+            G.add_edge(paper_id, concept_id, type=relation)
+            added.append(f"  {paper.get('title', paper_id)[:40]} --[{relation}]--> {name}")
+
+    # 自动建立 Method 之间的 "related_to" 关系
+    method_ids = [
+        f"concept:{e['name'].lower().replace(' ', '_')}"
+        for e in entities if e["type"] == "Method"
+    ]
+    for i, m1 in enumerate(method_ids):
+        for m2 in method_ids[i+1:]:
+            if not G.has_edge(m1, m2) and not G.has_edge(m2, m1):
+                G.add_edge(m1, m2, type="related_to")
+
+    _save_graph(G)
+
+    node_count = G.number_of_nodes()
+    edge_count = G.number_of_edges()
+    lines = [
+        f"✅ 实体提取完成（{source}）: {paper.get('title', paper_id)}",
+        f"   提取实体: {len(entities)} 个",
+    ]
+    lines.extend(added)
+    lines.append(f"   图谱总计: {node_count} 节点, {edge_count} 边")
+    return "\n".join(lines)
+
+
 def _find_node(G: nx.DiGraph, name: str) -> Optional[str]:
     """按 ID 或名称查找节点"""
     if G.has_node(name):
@@ -253,6 +463,7 @@ ACTION_MAP = {
     "add_paper": _action_add_paper,
     "add_concept": _action_add_concept,
     "add_relation": _action_add_relation,
+    "extract_from_abstract": _action_extract_from_abstract,
     "query": _action_query,
     "find_path": _action_find_path,
     "stats": _action_stats,
@@ -268,3 +479,12 @@ async def handle_knowledge_graph(args: dict) -> str:
     G = _load_graph()
     handler = ACTION_MAP[action]
     return handler(G, args)
+
+
+def extract_from_abstract_sync(paper_id: str, entities: list[dict] | None = None) -> str:
+    """同步版本，供 paper_parse 直接调用"""
+    G = _load_graph()
+    args = {"paper_id": paper_id}
+    if entities:
+        args["entities"] = entities
+    return _action_extract_from_abstract(G, args)

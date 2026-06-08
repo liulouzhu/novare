@@ -103,7 +103,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["add_paper", "add_concept", "add_relation", "query", "find_path", "stats"],
+                        "enum": ["add_paper", "add_concept", "add_relation", "extract_from_abstract", "query", "find_path", "stats"],
                     },
                     "paper_id": {"type": "string"},
                     "name": {"type": "string"},
@@ -112,6 +112,18 @@ async def list_tools() -> list[Tool]:
                     "predicate": {"type": "string"},
                     "object": {"type": "string"},
                     "target": {"type": "string"},
+                    "entities": {
+                        "type": "array",
+                        "description": "手动提供的实体列表（可选），每项含 name 和 type（Method/Dataset/Task）",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "type": {"type": "string", "enum": ["Method", "Dataset", "Task"]},
+                            },
+                            "required": ["name"],
+                        },
+                    },
                 },
                 "required": ["action"],
             },

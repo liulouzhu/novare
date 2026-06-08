@@ -111,10 +111,16 @@ def _default_system_prompt(workspace: Path) -> str:
 
 工作流指引：
 1. 先搜索获取论文列表和 ID
-2. 用 paper_parse 解析感兴趣的论文 PDF
+2. 用 paper_parse 解析感兴趣的论文 PDF（解析完成后会自动从摘要提取实体到知识图谱）
 3. 用 rag_query 在已解析的论文库中语义问答
-4. 用 knowledge_graph 构建概念关系图谱
+4. 用 knowledge_graph 构建概念关系图谱（查询自动构建的实体，或手动补充更多关系）
 5. 用 code_execute 进行数据分析和可视化
+
+知识图谱指引：
+- paper_parse 解析完成后会自动提取摘要中的方法、数据集、任务实体
+- 可以用 knowledge_graph(action="query") 查看已有实体和关系
+- 可以用 knowledge_graph(action="extract_from_abstract", paper_id="...", entities=[...]) 手动补充实体
+- 可以用 knowledge_graph(action="find_path") 发现概念之间的关联路径
 
 输出规范：
 - 引用论文时提供标题、作者、年份

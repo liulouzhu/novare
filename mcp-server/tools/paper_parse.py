@@ -210,6 +210,16 @@ async def handle_paper_parse(args: dict) -> str:
         preview = sec["text"][:200].replace("\n", " ")
         section_summary.append(f"  [{sec['section']}] {preview}...")
 
+    # 自动构建知识图谱（从摘要提取实体）
+    kg_result = ""
+    if resolved_paper_id:
+        try:
+            from tools.knowledge_graph import extract_from_abstract_sync
+            kg_result = extract_from_abstract_sync(resolved_paper_id)
+            logger.info("Knowledge graph updated for %s", resolved_paper_id)
+        except Exception as e:
+            logger.warning("Knowledge graph extraction failed: %s", e)
+
     result_parts = [
         f"✅ 论文解析完成: {resolved_paper_id}",
         f"   PDF: {pdf_path}",
@@ -227,6 +237,11 @@ async def handle_paper_parse(args: dict) -> str:
         result_parts.append(f"## 参考文献（前 10 条，共 {len(refs)} 条）")
         for ref in refs[:10]:
             result_parts.append(f"  - {ref[:150]}")
+
+    if kg_result:
+        result_parts.append("")
+        result_parts.append(f"## 知识图谱")
+        result_parts.append(kg_result)
 
     return "\n".join(result_parts)
 
