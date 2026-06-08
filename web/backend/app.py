@@ -36,15 +36,6 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     logging.getLogger("novare.web").info("DB tables ensured")
 
-    # 尝试连接 Milvus（可选，失败时优雅降级）
-    try:
-        from mcp_server.core.vector_store import connect_milvus, ensure_collection
-        connect_milvus()
-        ensure_collection()
-        logging.getLogger("novare.web").info("Milvus connected and collection ensured")
-    except Exception:
-        logging.getLogger("novare.web").warning("Milvus unavailable (non-fatal)", exc_info=True)
-
     await agent_service.initialize()
     try:
         yield
