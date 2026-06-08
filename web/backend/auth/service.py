@@ -1,10 +1,21 @@
 import os
+import secrets
+import logging
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
 from jose import JWTError, jwt
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change-me-in-production-use-openssl-rand-hex-32")
+logger = logging.getLogger(__name__)
+
+_secret = os.getenv("JWT_SECRET_KEY")
+if not _secret:
+    _secret = secrets.token_hex(32)
+    logger.warning(
+        "JWT_SECRET_KEY not set — generated ephemeral key. "
+        "Set JWT_SECRET_KEY env var for persistent sessions across restarts."
+    )
+SECRET_KEY = _secret
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
 
