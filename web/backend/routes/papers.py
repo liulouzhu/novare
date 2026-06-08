@@ -112,16 +112,17 @@ async def get_paper_chunks(
 @router.get("/{paper_id:path}/pdf")
 async def get_paper_pdf(
     paper_id: str,
-    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """获取论文 PDF 文件"""
+    """获取论文 PDF 文件（无需认证，便于新标签页打开）"""
+    from fastapi.responses import RedirectResponse
+
     paper_repo = PaperRepository(db)
     paper = paper_repo.get_by_id(paper_id)
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
 
-    # 优先使用本地路径
+    # 1. 本地已下载的 PDF
     if paper.pdf_path and os.path.isfile(paper.pdf_path):
         return FileResponse(
             paper.pdf_path,
@@ -129,11 +130,19 @@ async def get_paper_pdf(
             filename=f"{paper.title[:80]}.pdf",
         )
 
-    # 其次使用 URL（返回重定向）
-    if paper.url:
-        from fastapi.responses import RedirectResponse
-        # 尝试构造 PDF URL（arXiv 格式）
-        pdf_url = paper.url.replace("/abs/", "/pdf/") if "/abs/" in paper.url else paper.url
-        return RedirectResponse(url=pdf_url, status_code=302)
+    # 2. 根据论文 ID 构造 PDF URL
+    pid = paper.id
+    if pid.startswith("arxiv:"):
+        arxiv_id = pid.removeprefix("arxiv:")
+        return RedirectResponse(url=f"https://arxiv.org/pdf/{arxiv_id}", status_code=302)
 
-    raise HTTPException(status_code=404, detail="PDF not available for this paper")
+    if pid.startswith("doi:10.48550/arXiv."):
+        # doi 格式的 arXiv 论文
+        arxiv_id = pid.removeprefix("doi:10.48550/arXiv.")
+        return RedirectResponse(url=f"https://arxiv.org/pdf/{arxiv_id}", status_code=302)
+
+    # 3. Semantic Scholar — 跳转到论文页面（页面上有 PDF 链接）
+    if paper.url:
+        return RedirectResponse(url=paper.url, status_code=302)
+
+    raise HTTPException(status_code=404, detail="PDF not available")
