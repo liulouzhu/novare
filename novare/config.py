@@ -36,6 +36,9 @@ class NovareConfig:
     auto_compact_threshold: int = 100_000   # 累积 input tokens 超过此值触发自动压缩
     preserve_recent_messages: int = 4       # 压缩时保留最近 N 条消息
 
+    # 长期记忆
+    enable_long_term_memory: bool = True    # 是否启用长期记忆
+
     @classmethod
     def load(cls, config_path: str | Path | None = None) -> "NovareConfig":
         """从 .env 文件、环境变量和配置文件加载配置"""

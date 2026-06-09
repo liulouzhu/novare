@@ -136,3 +136,26 @@ class KnowledgeEdge(Base):
     properties = Column(JSONB, default=dict)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class UserMemory(Base):
+    """用户长期记忆 — 自动从对话中提取的用户偏好。"""
+    __tablename__ = "user_memories"
+    __table_args__ = (
+        UniqueConstraint("user_id", "category", "key", name="uq_user_memory_key"),
+        Index("idx_user_memories_user", "user_id"),
+        Index("idx_user_memories_category", "user_id", "category"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    category = Column(String(50), nullable=False)    # "research_preference" | "interaction_preference"
+    key = Column(String(100), nullable=False)         # 如 "research_field", "preferred_language"
+    value = Column(Text, nullable=False)              # 具体值
+    confidence = Column(Float, default=1.0)           # 置信度 0-1
+    tags = Column(JSONB, default=list)                # 标签列表
+    source = Column(String(50), default="auto")       # "auto" | "user"
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    user = relationship("User")

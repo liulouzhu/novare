@@ -23,6 +23,7 @@ from novare.session import Session, JsonlSessionStore  # noqa: E402
 from novare.tools.registry import ToolDef, ToolRegistry  # noqa: E402
 from web.backend.db.base import SessionLocal  # noqa: E402
 from web.backend.repositories import SessionRepository, MessageRepository  # noqa: E402
+from web.backend.memory_service import MemoryServiceAsync  # noqa: E402
 
 logger = logging.getLogger("novare.web")
 
@@ -36,6 +37,7 @@ class AgentService:
         self.reviewer_llm: LLMClient | None = None
         self.tool_registry: ToolRegistry | None = None
         self.agent: AgentLoop | None = None
+        self.memory_service: MemoryServiceAsync | None = None
         self._mcp_clients: list[McpClient] = []
 
     async def initialize(self):
@@ -85,6 +87,13 @@ class AgentService:
                 logger.info("Registered %d tools from %s", len(raw_tools), name)
             except Exception:
                 logger.exception("Failed to connect MCP server: %s", name)
+
+        # 长期记忆服务
+        if self.config.enable_long_term_memory:
+            self.memory_service = MemoryServiceAsync()
+            logger.info("Long-term memory enabled")
+        else:
+            self.memory_service = None
 
         self.agent = AgentLoop(
             llm_client=self.llm_client,
@@ -198,6 +207,18 @@ class AgentService:
                 })
 
         try:
+            # ── 注入长期记忆到 system prompt ──
+            if user_id and self.memory_service:
+                memory_prompt = self.memory_service._get_existing_text(user_id)
+                if memory_prompt:
+                    self.agent.system_prompt = (
+                        self.config.system_prompt
+                        + "\n\n## 用户画像\n" + memory_prompt
+                        + "\n请根据以上用户画像调整你的回答风格和内容侧重。\n"
+                    )
+                else:
+                    self.agent.system_prompt = self.config.system_prompt
+
             # 记录本轮前的消息数，用于提取新增消息
             msgs_before = len(session.messages)
 
@@ -245,6 +266,18 @@ class AgentService:
 
             # ── 持久化到 JSONL（agent loop 需要） ──
             session.save()
+
+            # ── 对话结束后自动提取长期记忆 ──
+            if user_id and self.memory_service and self.llm_client:
+                try:
+                    await self.memory_service.extract_and_save(
+                        user_id=user_id,
+                        messages=session.messages,
+                        llm_client=self.llm_client,
+                    )
+                except Exception:
+                    logger.warning("Memory extraction failed (non-fatal)")
+
             await queue.put({"type": "done"})
             return result
         except Exception as e:
