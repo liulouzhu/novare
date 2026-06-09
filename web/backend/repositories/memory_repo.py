@@ -110,3 +110,30 @@ class MemoryRepository(BaseRepository):
             .filter(UserMemory.user_id == self.user_id)
             .count()
         )
+
+    def evict_excess(self, max_count: int) -> int:
+        """淘汰超出上限的记忆条目，返回删除数量
+
+        淘汰策略：按置信度升序 + 更新时间升序排列，删除多余的条目。
+        即：低置信度 + 长时间未更新的先被淘汰。
+        """
+        current = self.count()
+        if current <= max_count:
+            return 0
+
+        to_remove = current - max_count
+
+        # 找到要淘汰的条目（低置信度优先，其次最久未更新）
+        candidates = (
+            self.db.query(UserMemory)
+            .filter(UserMemory.user_id == self.user_id)
+            .order_by(UserMemory.confidence.asc(), UserMemory.updated_at.asc())
+            .limit(to_remove)
+            .all()
+        )
+
+        for m in candidates:
+            self.db.delete(m)
+
+        self.db.flush()
+        return len(candidates)

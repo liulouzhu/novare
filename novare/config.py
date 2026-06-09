@@ -38,6 +38,7 @@ class NovareConfig:
 
     # 长期记忆
     enable_long_term_memory: bool = True    # 是否启用长期记忆
+    max_memories_per_user: int = 50         # 每个用户最大记忆条数
 
     @classmethod
     def load(cls, config_path: str | Path | None = None) -> "NovareConfig":

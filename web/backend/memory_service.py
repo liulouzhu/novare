@@ -167,6 +167,9 @@ class MemoryService:
 class MemoryServiceAsync:
     """异步版本的记忆服务（用于 agent_service 中）"""
 
+    def __init__(self, max_memories: int = 50):
+        self.max_memories = max_memories
+
     async def extract_and_save(
         self,
         user_id: str,
@@ -266,7 +269,7 @@ class MemoryServiceAsync:
         return True
 
     def _save_memories(self, user_id: str, extracted: list[dict]) -> list[dict]:
-        """保存提取的记忆到数据库"""
+        """保存提取的记忆到数据库，超出上限时自动淘汰"""
         db = SessionLocal()
         try:
             repo = MemoryRepository(db, UUID(user_id))
@@ -285,6 +288,12 @@ class MemoryServiceAsync:
                     "key": memory.key,
                     "value": memory.value,
                 })
+
+            # 淘汰超出上限的条目
+            evicted = repo.evict_excess(self.max_memories)
+            if evicted > 0:
+                logger.info("Evicted %d excess memories for user %s (max=%d)", evicted, user_id, self.max_memories)
+
             db.commit()
             return saved
         except Exception:

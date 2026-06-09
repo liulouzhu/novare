@@ -90,8 +90,8 @@ class AgentService:
 
         # 长期记忆服务
         if self.config.enable_long_term_memory:
-            self.memory_service = MemoryServiceAsync()
-            logger.info("Long-term memory enabled")
+            self.memory_service = MemoryServiceAsync(max_memories=self.config.max_memories_per_user)
+            logger.info("Long-term memory enabled (max=%d)", self.config.max_memories_per_user)
         else:
             self.memory_service = None
 
