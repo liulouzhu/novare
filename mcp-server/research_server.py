@@ -29,7 +29,6 @@ logger = logging.getLogger("research-server")
 # 数据目录
 DATA_DIR = os.environ.get("RESEARCH_DATA_DIR", "./data")
 PAPERS_DIR = os.path.join(DATA_DIR, "papers")
-DB_PATH = os.path.join(DATA_DIR, "research.db")
 KG_PATH = os.path.join(DATA_DIR, "knowledge_graph.json")
 
 # 确保目录存在

@@ -5,7 +5,8 @@
       "args": ["-m", "research_server"],
       "cwd": "D:/project/research-agent/mcp-server",
       "env": {
-        "RESEARCH_DATA_DIR": "D:/project/research-agent/mcp-server/data"
+        "RESEARCH_DATA_DIR": "D:/project/research-agent/mcp-server/data",
+        "DATABASE_URL": "postgresql://postgres:123456@localhost:5432/research_agent"
       },
       "toolCallTimeoutMs": 120000
     }

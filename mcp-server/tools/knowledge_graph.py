@@ -423,12 +423,16 @@ def _action_extract_from_abstract(G: nx.DiGraph, args: dict) -> str:
         if not abstract:
             # 尝试从已解析的分块中获取摘要
             with get_connection() as conn:
-                chunks = conn.execute(
-                    "SELECT text FROM chunks WHERE paper_id=? AND section LIKE '%abstract%' ORDER BY ordinal LIMIT 1",
-                    (paper_id,)
-                ).fetchall()
-            if chunks:
-                abstract = chunks[0]["text"]
+                from web.backend.db.models import Chunk
+                rows = (
+                    conn.query(Chunk.text)
+                    .filter(Chunk.paper_id == paper_id, Chunk.section.ilike("%abstract%"))
+                    .order_by(Chunk.ordinal)
+                    .limit(1)
+                    .all()
+                )
+            if rows:
+                abstract = rows[0][0]
         if not abstract:
             _save_graph(G)
             return f"论文 {paper_id} 没有摘要，无法自动提取实体。请手动提供 entities 参数。"

@@ -94,7 +94,13 @@ class NovareConfig:
                 cfg.mcp_servers["research"] = McpServerConfig(
                     command=str(venv_python),
                     args=[str(mcp_server_py)],
-                    env={"RESEARCH_DATA_DIR": str(cfg.data_dir)},
+                    env={
+                        "RESEARCH_DATA_DIR": str(cfg.data_dir),
+                        "DATABASE_URL": os.getenv(
+                            "DATABASE_URL",
+                            "postgresql://postgres:123456@localhost:5432/research_agent",
+                        ),
+                    },
                 )
 
         # 默认系统提示词

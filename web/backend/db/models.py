@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Column, String, Integer, Text, Boolean, DateTime, Float,
+    Column, String, Integer, Text, Boolean, DateTime, Float, LargeBinary,
     ForeignKey, UniqueConstraint, Index,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
@@ -82,6 +82,15 @@ class Citation(Base):
 
     source_id = Column(String(255), ForeignKey("papers.id"), primary_key=True)
     target_id = Column(String(255), ForeignKey("papers.id"), primary_key=True)
+
+
+class Embedding(Base):
+    """Vector embedding for a chunk — stored as numpy float32 bytes."""
+    __tablename__ = "embeddings"
+
+    chunk_id = Column(Integer, ForeignKey("chunks.id", ondelete="CASCADE"), primary_key=True)
+    dim = Column(Integer, nullable=False)
+    vec = Column(LargeBinary, nullable=False)  # numpy.float32 tobytes()
 
 
 class SessionModel(Base):
