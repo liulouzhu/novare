@@ -275,6 +275,11 @@ class MemoryServiceAsync:
             repo = MemoryRepository(db, UUID(user_id))
             saved = []
             for item in extracted:
+                # 研究偏好 + 高置信度 → 自动锁定（不参与淘汰）
+                auto_pin = (
+                    item["category"] == "research_preference"
+                    and float(item.get("confidence", 1.0)) >= 0.8
+                )
                 memory = repo.upsert(
                     category=item["category"],
                     key=item["key"],
@@ -282,11 +287,13 @@ class MemoryServiceAsync:
                     confidence=float(item.get("confidence", 1.0)),
                     tags=item.get("tags", []),
                     source="auto",
+                    pinned=auto_pin,
                 )
                 saved.append({
                     "category": memory.category,
                     "key": memory.key,
                     "value": memory.value,
+                    "pinned": memory.pinned,
                 })
 
             # 淘汰超出上限的条目

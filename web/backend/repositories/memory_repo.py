@@ -52,10 +52,12 @@ class MemoryRepository(BaseRepository):
         confidence: float = 1.0,
         tags: list[str] | None = None,
         source: str = "auto",
+        pinned: bool = False,
     ) -> UserMemory:
         """插入或更新记忆条目
 
         如果相同 user_id + category + key 已存在，则更新 value、confidence、tags。
+        pinned 字段：如果新条目 pinned=True，则更新时也锁定。
         """
         existing = self.get_by_key(category, key)
         if existing:
@@ -64,6 +66,8 @@ class MemoryRepository(BaseRepository):
             if tags is not None:
                 existing.tags = tags
             existing.source = source
+            if pinned:
+                existing.pinned = True  # 只能从 False → True，不自动解锁
             self.db.flush()
             return existing
 
@@ -73,6 +77,7 @@ class MemoryRepository(BaseRepository):
             key=key,
             value=value,
             confidence=confidence,
+            pinned=pinned,
             tags=tags or [],
             source=source,
         )
@@ -114,8 +119,10 @@ class MemoryRepository(BaseRepository):
     def evict_excess(self, max_count: int) -> int:
         """淘汰超出上限的记忆条目，返回删除数量
 
-        淘汰策略：按置信度升序 + 更新时间升序排列，删除多余的条目。
-        即：低置信度 + 长时间未更新的先被淘汰。
+        淘汰策略：
+        1. pinned=True 的条目永远不会被淘汰
+        2. 在非 pinned 条目中，按置信度升序 + 更新时间升序排列
+        3. 低置信度 + 长时间未更新的先被淘汰
         """
         current = self.count()
         if current <= max_count:
@@ -123,10 +130,13 @@ class MemoryRepository(BaseRepository):
 
         to_remove = current - max_count
 
-        # 找到要淘汰的条目（低置信度优先，其次最久未更新）
+        # 只从非 pinned 条目中淘汰
         candidates = (
             self.db.query(UserMemory)
-            .filter(UserMemory.user_id == self.user_id)
+            .filter(
+                UserMemory.user_id == self.user_id,
+                UserMemory.pinned == False,  # noqa: E712
+            )
             .order_by(UserMemory.confidence.asc(), UserMemory.updated_at.asc())
             .limit(to_remove)
             .all()

@@ -29,6 +29,7 @@ def upgrade() -> None:
         sa.Column('key', sa.String(length=100), nullable=False),
         sa.Column('value', sa.Text(), nullable=False),
         sa.Column('confidence', sa.Float(), server_default='1.0', nullable=True),
+        sa.Column('pinned', sa.Boolean(), server_default='false', nullable=True),
         sa.Column('tags', postgresql.JSONB(astext_type=sa.Text()), server_default='[]', nullable=True),
         sa.Column('source', sa.String(length=50), server_default='auto', nullable=True),
         sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
