@@ -29,6 +29,16 @@
   - action: add_paper / add_concept / add_relation / query / find_path / stats
   - 建议在解析论文后调用 add_paper 建立图谱
 
+- **innovation_search**：创新点研究的文献搜索工具。
+  - action="landscape"：对研究主题进行多源文献扫描，返回按相关性排序的论文列表
+  - action="novelty_search"：针对特定创新点候选的关键词搜索相关论文
+  - 参数：action（必填）、topic、keywords、max_per_source
+
+- **reviewer_evaluate**：双模型对抗评审工具（需要配置评审模型）。
+  - stage="candidates"：让评审模型独立评估候选创新点质量
+  - stage="review"：让评审模型对执行者的评审做交叉验证
+  - 参数：topic（必填）、stage（必填）、candidates（必填）、executor_review
+
 - **code_execute**：统计分析、数据可视化。
   - 参数：code（必填）、timeout
   - 预装 numpy、pandas、matplotlib、scipy
@@ -44,3 +54,4 @@
 2. **深度分析**：paper_search → paper_parse（选 2-3 篇） → rag_query → 综合回答
 3. **知识图谱**：paper_search → paper_parse → knowledge_graph(add_paper) → knowledge_graph(query/find_path)
 4. **数据驱动**：paper_parse → rag_query → code_execute（提取数据并分析）
+5. **创新点发现**：innovation_search(landscape) → 生成候选 → innovation_search(novelty_search) → 评审打分 → 迭代修订
