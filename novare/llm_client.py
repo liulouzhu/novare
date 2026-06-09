@@ -37,6 +37,7 @@ class StreamChunk:
     tool_call_name: str = ""
     tool_call_arguments_delta: str = ""  # JSON 字符串增量
     finish_reason: str | None = None
+    usage: dict | None = None            # 部分 API 在最后一个 chunk 返回 usage
 
 
 def parse_chat_response(raw: dict) -> LLMResponse:
@@ -88,6 +89,10 @@ def parse_stream_line(line: str) -> StreamChunk | None:
         reasoning_delta=delta.get("reasoning_content") or "",
         finish_reason=finish,
     )
+
+    # 提取 usage（部分 API 在最后一个 chunk 返回）
+    if "usage" in obj and obj["usage"]:
+        chunk.usage = obj["usage"]
 
     # 工具调用（增量）
     for tc in (delta.get("tool_calls") or []):
@@ -168,6 +173,7 @@ class LLMClient:
         content_parts: list[str] = []
         tool_calls_build: dict[int, dict] = {}  # index → {id, name, arguments}
         finish_reason = "stop"
+        usage_data: dict = {}
 
         async for chunk in self.chat_stream(messages, tools, max_tokens):
             # 推理过程（MiMo 等推理模型的思考过程）
@@ -197,6 +203,10 @@ class LLMClient:
             if chunk.finish_reason and chunk.finish_reason != "done":
                 finish_reason = chunk.finish_reason
 
+            # 收集 usage（部分 API 在最后一个 chunk 返回）
+            if chunk.usage:
+                usage_data = chunk.usage
+
         # 组装 ToolCall 列表
         tool_calls = []
         for idx in sorted(tool_calls_build.keys()):
@@ -211,6 +221,7 @@ class LLMClient:
             content="".join(content_parts),
             tool_calls=tool_calls,
             stop_reason=finish_reason,
+            usage=usage_data,
         )
 
     def _build_body(self, messages, tools, max_tokens, stream=False):

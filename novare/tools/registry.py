@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable, Awaitable
 
 from novare.tools import file_ops
+from novare.tools.reviewer_evaluate import handle_reviewer_evaluate
 
 logger = logging.getLogger("novare.tools")
 
@@ -99,6 +100,46 @@ _BUILTIN_TOOLS: list[dict] = [
         },
         "handler": file_ops.handle_grep_search,
     },
+    {
+        "name": "reviewer_evaluate",
+        "description": (
+            "用独立的评审模型对候选创新点做对抗评审。双模型模式：executor 生成候选，reviewer 独立评估。"
+            "需要配置评审模型环境变量。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "研究主题"},
+                "stage": {
+                    "type": "string",
+                    "enum": ["candidates", "review"],
+                    "description": "评审阶段：candidates（评估候选质量）或 review（对执行者的评审做交叉验证）",
+                },
+                "candidates": {
+                    "type": "array",
+                    "description": "候选创新点列表",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "problem": {"type": "string"},
+                            "idea": {"type": "string"},
+                            "key_difference": {"type": "string"},
+                            "expected_value": {"type": "string"},
+                            "keywords": {"type": "array", "items": {"type": "string"}},
+                            "innovation_level": {"type": "string"},
+                        },
+                    },
+                },
+                "executor_review": {
+                    "type": "string",
+                    "description": "执行者的评审结果摘要（stage='review' 时提供）",
+                },
+            },
+            "required": ["topic", "stage", "candidates"],
+        },
+        "handler": handle_reviewer_evaluate,
+    },
 ]
 
 
@@ -110,12 +151,14 @@ class ToolRegistry:
 
     def _register_builtins(self):
         for t in _BUILTIN_TOOLS:
+            # reviewer_evaluate 需要 tool_context（包含 reviewer_llm）
+            source = "builtin:context" if t["name"] == "reviewer_evaluate" else "builtin"
             self._tools[t["name"]] = ToolDef(
                 name=t["name"],
                 description=t["description"],
                 parameters=t["parameters"],
                 handler=t["handler"],
-                source="builtin",
+                source=source,
             )
 
     def register_tool(self, tool: ToolDef):
@@ -138,7 +181,9 @@ class ToolRegistry:
 
         try:
             kwargs = {"workspace": self.workspace}
-            if tool.source.startswith("mcp:") and tool_context:
+            # MCP 工具和需要上下文的内置工具（如 reviewer_evaluate）传递 tool_context
+            needs_context = tool.source.startswith("mcp:") or tool.source == "builtin:context"
+            if needs_context and tool_context:
                 kwargs.update(tool_context)
             result = await tool.handler(arguments, **kwargs)
             return result

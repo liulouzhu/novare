@@ -33,6 +33,7 @@ class AgentService:
     def __init__(self):
         self.config: NovareConfig | None = None
         self.llm_client: LLMClient | None = None
+        self.reviewer_llm: LLMClient | None = None
         self.tool_registry: ToolRegistry | None = None
         self.agent: AgentLoop | None = None
         self._mcp_clients: list[McpClient] = []
@@ -46,6 +47,17 @@ class AgentService:
             base_url=self.config.base_url,
             model=self.config.model,
         )
+
+        # 评审模型（可选，用于双模型对抗评审）
+        if self.config.reviewer_api_key:
+            self.reviewer_llm = LLMClient(
+                api_key=self.config.reviewer_api_key,
+                base_url=self.config.reviewer_base_url or self.config.base_url,
+                model=self.config.reviewer_model or self.config.model,
+            )
+            logger.info("Reviewer model enabled: %s", self.config.reviewer_model or self.config.model)
+        else:
+            self.reviewer_llm = None
 
         self.tool_registry = ToolRegistry(workspace=self.config.workspace)
 
@@ -78,8 +90,15 @@ class AgentService:
             llm_client=self.llm_client,
             tool_registry=self.tool_registry,
             system_prompt=self.config.system_prompt,
+            reviewer_llm=self.reviewer_llm,
+            auto_compact_threshold=self.config.auto_compact_threshold,
+            preserve_recent_messages=self.config.preserve_recent_messages,
         )
-        logger.info("AgentService initialized (model=%s)", self.config.model)
+        mode = "dual-model" if self.reviewer_llm else "single-model"
+        logger.info(
+            "AgentService initialized (model=%s, mode=%s, auto_compact=%d)",
+            self.config.model, mode, self.config.auto_compact_threshold,
+        )
 
     async def shutdown(self):
         """关闭时清理资源"""
@@ -90,6 +109,8 @@ class AgentService:
                 pass
         if self.llm_client:
             await self.llm_client.close()
+        if self.reviewer_llm:
+            await self.reviewer_llm.close()
         logger.info("AgentService shut down")
 
     def _workspace_for(self, user_id: str | None = None) -> Path:

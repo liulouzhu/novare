@@ -55,6 +55,16 @@ class Session:
     def _path(self) -> Path:
         return self._dir / f"{self.session_id}.jsonl"
 
+    @property
+    def has_compacted(self) -> bool:
+        """会话是否包含压缩过的消息"""
+        return any(m.get("_compacted") for m in self.messages)
+
+    @property
+    def compacted_count(self) -> int:
+        """压缩消息的数量"""
+        return sum(1 for m in self.messages if m.get("_compacted"))
+
     def add_user_message(self, content: str):
         self.messages.append({"role": "user", "content": content})
 
@@ -72,6 +82,11 @@ class Session:
         })
 
     def save(self):
+        """保存消息到 JSONL 文件
+
+        压缩后的消息（带 _compacted 标记）也会被保存，
+        确保 CLI 模式重新加载时上下文已压缩。
+        """
         if not self.messages:
             return  # 空会话不写文件
         self._dir.mkdir(parents=True, exist_ok=True)

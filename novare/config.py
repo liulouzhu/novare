@@ -26,6 +26,16 @@ class NovareConfig:
     system_prompt: str = ""
     skill_dirs: list[Path] = field(default_factory=list)
 
+    # 评审模型配置（可选，用于双模型对抗评审）
+    # 留空时禁用双模型模式，所有阶段使用主模型
+    reviewer_api_key: str = ""
+    reviewer_base_url: str = ""
+    reviewer_model: str = ""
+
+    # 上下文管理
+    auto_compact_threshold: int = 100_000   # 累积 input tokens 超过此值触发自动压缩
+    preserve_recent_messages: int = 4       # 压缩时保留最近 N 条消息
+
     @classmethod
     def load(cls, config_path: str | Path | None = None) -> "NovareConfig":
         """从 .env 文件、环境变量和配置文件加载配置"""
@@ -38,6 +48,11 @@ class NovareConfig:
         cfg.api_key = os.environ.get("NOVARE_API_KEY", cfg.api_key)
         cfg.base_url = os.environ.get("NOVARE_BASE_URL", cfg.base_url)
         cfg.model = os.environ.get("NOVARE_MODEL", cfg.model)
+
+        # 评审模型（可选）
+        cfg.reviewer_api_key = os.environ.get("NOVARE_REVIEWER_API_KEY", cfg.reviewer_api_key)
+        cfg.reviewer_base_url = os.environ.get("NOVARE_REVIEWER_BASE_URL", cfg.reviewer_base_url)
+        cfg.reviewer_model = os.environ.get("NOVARE_REVIEWER_MODEL", cfg.reviewer_model)
 
         data_dir = os.environ.get("NOVARE_DATA_DIR")
         if data_dir:
@@ -116,6 +131,9 @@ def _default_system_prompt(workspace: Path) -> str:
 - 执行 Python 代码做数据分析（code_execute）
 - 读写文件（read_file, write_file, edit_file）
 - 搜索文件（glob_search, grep_search）
+
+如果评审模型已配置，你还拥有：
+- reviewer_evaluate：用独立的评审模型对候选创新点做对抗评审（双模型模式）
 
 工作空间：{workspace}
 

@@ -7,6 +7,13 @@ import logging
 import time
 from typing import TYPE_CHECKING, Callable
 
+from novare.context_manager import (
+    UsageTracker,
+    TokenUsage,
+    compact_messages,
+    estimate_messages_tokens,
+)
+
 if TYPE_CHECKING:
     from novare.llm_client import LLMClient
     from novare.tools.registry import ToolRegistry
@@ -23,11 +30,18 @@ class AgentLoop:
         tool_registry: ToolRegistry,
         system_prompt: str = "",
         max_iterations: int = 20,
+        reviewer_llm: LLMClient | None = None,
+        auto_compact_threshold: int = 100_000,
+        preserve_recent_messages: int = 4,
     ):
         self.llm_client = llm_client
         self.tool_registry = tool_registry
         self.system_prompt = system_prompt
         self.max_iterations = max_iterations
+        self.reviewer_llm = reviewer_llm
+        self.usage_tracker = UsageTracker()
+        self.auto_compact_threshold = auto_compact_threshold
+        self.preserve_recent_messages = preserve_recent_messages
 
     async def run_turn(
         self,
@@ -44,10 +58,16 @@ class AgentLoop:
                  签名：(event, name, arguments, result_preview, duration_sec)
                  event: "start" | "end" | "error"
         """
+        # 将 reviewer_llm 注入 tool_context，供 reviewer_evaluate 工具使用
+        if tool_context is None:
+            tool_context = {}
+        if self.reviewer_llm:
+            tool_context["reviewer_llm"] = self.reviewer_llm
+
         session.add_user_message(user_input)
 
         for iteration in range(self.max_iterations):
-            # 构建消息
+            # 构建消息（可能已被压缩）
             messages = self._build_messages(session)
 
             # 流式调用 LLM，on_text 实时输出
@@ -56,9 +76,20 @@ class AgentLoop:
                 messages, tools=tools, on_text=on_text,
             )
 
-            # 如果没有工具调用，返回最终回答
+            # 追踪 usage（用于触发自动压缩）
+            if response.usage:
+                self.usage_tracker.add(TokenUsage(
+                    input_tokens=response.usage.get("prompt_tokens", 0)
+                        or response.usage.get("input_tokens", 0),
+                    output_tokens=response.usage.get("completion_tokens", 0)
+                        or response.usage.get("output_tokens", 0),
+                ))
+                logger.debug("Usage: %s", self.usage_tracker.summary())
+
+            # 如果没有工具调用，检查是否需要压缩后返回
             if not response.tool_calls:
                 session.add_assistant_message(response.content)
+                self._maybe_auto_compact(session)
                 return response.content
 
             # 有工具调用：记录 assistant 消息（含 tool_calls）
@@ -87,11 +118,84 @@ class AgentLoop:
                 session.add_tool_result(tc.id, result)
                 logger.debug("Tool result: %s → %d chars", tc.name, len(result))
 
+            # 每轮工具循环结束后检查是否需要压缩
+            self._maybe_auto_compact(session)
+
         return "达到最大迭代次数（{}），请简化问题后重试。".format(self.max_iterations)
 
+    async def run_reviewer(
+        self,
+        prompt: str,
+        on_text: Callable[[str], None] | None = None,
+    ) -> str:
+        """用评审模型独立评估。不走工具循环，直接返回评审结果。
+
+        用于双模型对抗评审：executor 模型生成候选，reviewer 模型独立打分。
+        """
+        if not self.reviewer_llm:
+            return "Error: 评审模型未配置。请设置 NOVARE_REVIEWER_API_KEY 等环境变量。"
+
+        messages = [
+            {"role": "system", "content": "你是一个独立的研究评审专家。请根据提供的候选创新点和相关论文，给出客观的评审意见。输出 JSON 格式。"},
+            {"role": "user", "content": prompt},
+        ]
+
+        response = await self.reviewer_llm.collect_stream(messages, on_text=on_text)
+        return response.content or ""
+
     def _build_messages(self, session) -> list[dict]:
+        """构建发送给 LLM 的消息列表
+
+        注意：session.messages 可能已被 _maybe_auto_compact() 压缩过，
+        此处直接使用，不再重复裁剪。
+        """
         messages = []
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
         messages.extend(session.messages)
         return messages
+
+    def _maybe_auto_compact(self, session) -> bool:
+        """检查是否需要自动压缩，如果需要则执行压缩
+
+        借鉴 Claw Code 的 maybe_auto_compact() 策略：
+        当累积 input tokens 超过阈值时，压缩旧消息为摘要。
+        压缩只修改 session.messages（内存），不影响 PostgreSQL 中的完整历史。
+        """
+        if self.auto_compact_threshold <= 0:
+            return False
+
+        if not self.usage_tracker.should_compact(self.auto_compact_threshold):
+            return False
+
+        # 检查消息数量是否足够压缩
+        estimated_tokens = estimate_messages_tokens(session.messages)
+        logger.info(
+            "Auto-compact triggered: cumulative_input=%d, estimated_tokens=%d, messages=%d",
+            self.usage_tracker.cumulative_input, estimated_tokens, len(session.messages),
+        )
+
+        # 已经压缩过的消息（带 _compacted 标记）算作已压缩部分
+        # 传入完整 session.messages，compact_messages 内部会处理
+        compacted, did_compact = compact_messages(
+            session.messages,
+            self.system_prompt,
+            preserve_recent=self.preserve_recent_messages,
+        )
+
+        if did_compact:
+            session.messages = compacted
+            # 持久化压缩后的版本到 JSONL
+            session.save()
+            # 重置 usage 计数器，避免重复触发
+            self.usage_tracker.reset_after_compact()
+            new_tokens = estimate_messages_tokens(compacted)
+            logger.info(
+                "Compaction complete: %d → %d messages, ~%d tokens saved",
+                len(session.messages) + (len(compacted) - len(session.messages)),
+                len(compacted),
+                estimated_tokens - new_tokens,
+            )
+            return True
+
+        return False

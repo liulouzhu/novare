@@ -140,6 +140,35 @@ async def list_tools() -> list[Tool]:
                 "required": ["code"],
             },
         ),
+        Tool(
+            name="innovation_search",
+            description=(
+                "创新点研究的文献搜索工具。支持两种模式：\n"
+                "- landscape: 对研究主题进行多源文献扫描（Semantic Scholar + arXiv），返回按相关性排序的论文列表，用于了解研究全貌\n"
+                "- novelty_search: 针对特定创新点候选的关键词，搜索相关论文以评估新颖性"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["landscape", "novelty_search"],
+                        "description": "操作类型：landscape（文献景观扫描）或 novelty_search（新颖性搜索）",
+                    },
+                    "topic": {"type": "string", "description": "研究主题或问题描述"},
+                    "keywords": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "搜索关键词列表（novelty_search 模式使用）",
+                    },
+                    "max_per_source": {
+                        "type": "integer",
+                        "description": "每个数据源最大返回数量，默认 8",
+                    },
+                },
+                "required": ["action"],
+            },
+        ),
     ]
 
 
@@ -176,6 +205,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     if name == "code_execute":
         from tools.code_execute import handle_code_execute
         result = await handle_code_execute(arguments, user_id=user_id)
+        return [TextContent(type="text", text=result)]
+
+    if name == "innovation_search":
+        from tools.innovation_search import handle_innovation_search
+        result = await handle_innovation_search(arguments, user_id=user_id)
         return [TextContent(type="text", text=result)]
 
     return [TextContent(type="text", text=f"Unknown tool: {name}")]
