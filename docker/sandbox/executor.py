@@ -1,6 +1,8 @@
-"""Runs inside the Docker sandbox. Reads Python code from stdin, executes it safely."""
+"""Runs inside the Docker sandbox. Reads Python code from stdin or a file, executes it safely."""
 
 import sys
+import os
+import builtins
 import threading
 import io
 import traceback
@@ -9,13 +11,14 @@ BLOCKED_MODULES = {"os", "subprocess", "shutil", "socket", "http", "ctypes", "si
 BLOCKED_BUILTINS = {"exec", "eval", "compile", "__import__", "open"}
 ALLOWED_PATHS = ("/data/", "/output/")
 MAX_OUTPUT_BYTES = 1 * 1024 * 1024  # 1MB
-TIMEOUT_SECONDS = 60
+TIMEOUT_SECONDS = int(os.environ.get("TIMEOUT_SECONDS", 60))
+_original_open = builtins.open  # captured at import time
 
 
 def restricted_open(path, *args, **kwargs):
     if not any(path.startswith(p) for p in ALLOWED_PATHS):
         raise PermissionError(f"open() denied: {path} not in allowed paths")
-    return builtins_open(path, *args, **kwargs)
+    return _original_open(path, *args, **kwargs)
 
 
 def check_imports(code: str):
@@ -32,7 +35,18 @@ def check_imports(code: str):
 
 
 def main():
-    code = sys.stdin.read()
+    # Accept code from a file path argument (preferred) or stdin (fallback)
+    if len(sys.argv) > 1:
+        code_path = sys.argv[1]
+        try:
+            with open(code_path) as f:
+                code = f.read()
+        except FileNotFoundError:
+            print(f"Error: code file not found: {code_path}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        code = sys.stdin.read()
+
     if len(code) > 50 * 1024:
         print("Error: code too large (max 50KB)", file=sys.stderr)
         sys.exit(1)
@@ -48,9 +62,6 @@ def main():
         sys.stdout = captured_out
         sys.stderr = captured_err
 
-        import builtins
-        global builtins_open
-        builtins_open = builtins.open
         builtins.open = restricted_open
         for name in BLOCKED_BUILTINS:
             if hasattr(builtins, name):
@@ -70,7 +81,7 @@ def main():
     thread.start()
     thread.join(timeout=TIMEOUT_SECONDS)
     if thread.is_alive():
-        print("Error: Execution timed out (60s)", file=sys.stderr)
+        print(f"Error: Execution timed out ({TIMEOUT_SECONDS}s)", file=sys.stderr)
         sys.exit(1)
 
     out = result.get("out", "")

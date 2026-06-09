@@ -1,3 +1,4 @@
+import asyncio
 import time
 import io
 import tarfile
@@ -82,10 +83,15 @@ class DockerSandboxManager:
         return container
 
     async def execute(self, user_id: str, code: str, timeout: int = 60) -> dict:
-        """Execute code in user's sandbox container."""
+        """Execute code in user's sandbox container via executor.py (with full restrictions)."""
+        if not code or not code.strip():
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+        if len(code.encode("utf-8")) > 50 * 1024:
+            raise ValueError("Code too large (max 50KB)")
+
         container = self.get_or_create(user_id)
 
-        # Write code to temp file in container
+        # Write code to a temp file inside the container
         code_bytes = code.encode("utf-8")
         tar_stream = io.BytesIO()
         with tarfile.open(fileobj=tar_stream, mode="w") as tar:
@@ -93,21 +99,47 @@ class DockerSandboxManager:
             info.size = len(code_bytes)
             tar.addfile(info, io.BytesIO(code_bytes))
         tar_stream.seek(0)
-        container.put_archive("/tmp", tar_stream)
+        await asyncio.to_thread(container.put_archive, "/tmp", tar_stream)
 
-        # Execute with timeout
-        exit_code, (stdout, stderr) = container.exec_run(
-            cmd=["python", "-u", "/tmp/_run.py"],
-            demux=True,
-        )
+        # Execute through executor.py — enforces import/builtin/path/timeout/output limits
+        effective_timeout = max(1, min(timeout, 300))
+        try:
+            exit_code, (stdout, stderr) = await asyncio.wait_for(
+                asyncio.to_thread(
+                    container.exec_run,
+                    cmd=["python", "-u", "/executor.py", "/tmp/_run.py"],
+                    demux=True,
+                    environment={"TIMEOUT_SECONDS": str(effective_timeout)},
+                ),
+                timeout=effective_timeout + 5,
+            )
+        except asyncio.TimeoutError:
+            return {
+                "exit_code": -1,
+                "stdout": "",
+                "stderr": f"Error: Execution timed out ({effective_timeout}s)",
+            }
+        except Exception as e:
+            logger.error("Sandbox execution error: %s", e)
+            raise RuntimeError(f"Sandbox execution failed: {e}")
 
         self._last_used[user_id] = time.time()
 
-        return {
-            "exit_code": exit_code,
-            "stdout": (stdout or b"").decode("utf-8", errors="replace"),
-            "stderr": (stderr or b"").decode("utf-8", errors="replace"),
-        }
+        # Best-effort cleanup of temp file
+        try:
+            await asyncio.to_thread(
+                container.exec_run,
+                cmd=["rm", "-f", "/tmp/_run.py"],
+                demux=True,
+            )
+        except Exception:
+            pass
+
+        out = (stdout or b"").decode("utf-8", errors="replace")
+        err = (stderr or b"").decode("utf-8", errors="replace")
+        if exit_code != 0 and err:
+            raise RuntimeError(f"Code execution failed:\n{err}")
+        return {"exit_code": exit_code, "stdout": out, "stderr": err}
 
     def cleanup_idle(self):
         now = time.time()

@@ -23,8 +23,38 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(dot / (norm_a * norm_b))
 
 
-def _brute_force_search(query_vec: np.ndarray, top_k: int) -> list[dict]:
+def _get_user_paper_ids(user_id: str) -> set[str] | None:
+    """Get the set of paper_ids associated with a user from PostgreSQL.
+    Returns None if user_id is not provided or lookup fails."""
+    if not user_id:
+        return None
+    try:
+        from web.backend.db.base import SessionLocal
+        from web.backend.db.models import UserPaper
+        from uuid import UUID
+        db = SessionLocal()
+        try:
+            return {
+                str(up.paper_id)
+                for up in db.query(UserPaper.paper_id)
+                .filter(UserPaper.user_id == UUID(user_id))
+                .all()
+            }
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("Failed to get user papers for filtering: %s", e)
+        return None
+
+
+def _brute_force_search(
+    query_vec: np.ndarray, top_k: int, user_id: str = None
+) -> list[dict]:
     """Fallback: brute-force numpy cosine similarity over all SQLite embeddings."""
+    allowed_paper_ids = _get_user_paper_ids(user_id)
+    if user_id and allowed_paper_ids is not None and not allowed_paper_ids:
+        return []  # User has no papers — empty result
+
     with get_connection() as conn:
         all_embeddings = get_all_embeddings(conn)
 
@@ -33,6 +63,8 @@ def _brute_force_search(query_vec: np.ndarray, top_k: int) -> list[dict]:
 
     results = []
     for emb in all_embeddings:
+        if allowed_paper_ids is not None and emb["paper_id"] not in allowed_paper_ids:
+            continue
         if len(emb["vec"]) != len(query_vec):
             continue
         score = _cosine_similarity(query_vec, emb["vec"])
@@ -99,7 +131,7 @@ async def handle_rag_query(args: dict, user_id: str = None) -> str:
 
     # 1. Try Milvus first
     try:
-        top_results = _milvus_search(query_vec_list, top_k, DEFAULT_USER_ID)
+        top_results = _milvus_search(query_vec_list, top_k, user_id or DEFAULT_USER_ID)
         if top_results:
             search_method = "Milvus"
     except Exception as e:
@@ -107,7 +139,7 @@ async def handle_rag_query(args: dict, user_id: str = None) -> str:
 
     # 2. Fallback: brute-force numpy search
     if not top_results:
-        top_results = _brute_force_search(query_vec, top_k)
+        top_results = _brute_force_search(query_vec, top_k, user_id=user_id)
 
     if not top_results:
         return "论文库为空。请先使用 paper_parse 解析至少一篇论文。"

@@ -75,13 +75,14 @@ def _milvus_insert(
     chunk_ids: list[int],
     chunks: list[dict],
     embeddings: list[list[float]],
+    user_id: str = None,
 ) -> None:
     """Insert embeddings into Milvus. Silently skips on failure."""
     try:
         from core.vector_store import insert_vectors
 
         texts = [c["text"] for c in chunks]
-        insert_vectors(DEFAULT_USER_ID, paper_id, chunk_ids, texts, embeddings)
+        insert_vectors(user_id or DEFAULT_USER_ID, paper_id, chunk_ids, texts, embeddings)
     except Exception as e:
         logger.warning("Failed to insert vectors into Milvus (non-fatal): %s", e)
 
@@ -247,7 +248,7 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
 
     # 同步写入 Milvus（如果可用）
     if embeddings and chunk_ids:
-        _milvus_insert(resolved_paper_id, chunk_ids, all_chunks, embeddings)
+        _milvus_insert(resolved_paper_id, chunk_ids, all_chunks, embeddings, user_id=user_id)
 
     # 关联用户与论文（PostgreSQL）
     if resolved_paper_id:
