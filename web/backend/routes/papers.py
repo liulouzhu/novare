@@ -82,7 +82,7 @@ async def get_paper_pdf(
         is_owner = (
             paper.visibility == "public"
             or paper.created_by_user_id == user.id
-            or user_paper_repo.has_parsed(paper_id)
+            or user_paper_repo.has_fulltext_access(paper_id)
         )
         if not is_owner:
             raise HTTPException(status_code=403, detail="You do not have access to this paper's PDF")
@@ -128,13 +128,14 @@ async def list_papers(
     if not user_paper_ids:
         return []
 
+    fulltext_ids = user_paper_repo.get_fulltext_paper_ids()
     papers = paper_repo.get_all(q=q, user_id=user.id)
 
     result = []
     for p in papers:
         if p.id not in user_paper_ids:
             continue
-        parsed = p.id in user_paper_ids
+        parsed = p.id in fulltext_ids
         if is_parsed is not None and parsed != is_parsed:
             continue
         result.append(_paper_to_out(p, parsed))
@@ -158,7 +159,7 @@ async def get_paper(
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
 
-    is_parsed = user_paper_repo.has_parsed(paper_id)
+    is_parsed = user_paper_repo.has_fulltext_access(paper_id)
     return _paper_to_out(paper, is_parsed)
 
 

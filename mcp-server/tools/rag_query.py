@@ -24,7 +24,7 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _get_user_paper_ids(user_id: str) -> set[str] | None:
-    """Get the set of paper_ids associated with a user from PostgreSQL.
+    """Get paper_ids where user has fulltext access (parsed/uploaded).
     Returns None if user_id is not provided or lookup fails."""
     if not user_id:
         return None
@@ -37,7 +37,10 @@ def _get_user_paper_ids(user_id: str) -> set[str] | None:
             return {
                 str(up.paper_id)
                 for up in db.query(UserPaper.paper_id)
-                .filter(UserPaper.user_id == UUID(user_id))
+                .filter(
+                    UserPaper.user_id == UUID(user_id),
+                    UserPaper.has_fulltext_access.is_(True),
+                )
                 .all()
             }
         finally:

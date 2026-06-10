@@ -187,7 +187,12 @@ async def handle_innovation_search(arguments: dict, user_id: str = None) -> str:
                     from tools.paper_parse import associate_user_paper
                     for p in papers:
                         if p.get("paper_id"):
-                            associate_user_paper(user_id, p["paper_id"])
+                            associate_user_paper(
+                                user_id, p["paper_id"],
+                                relation_type="searched",
+                                has_fulltext_access=False,
+                                source="innovation_search",
+                            )
         except Exception as e:
             logger.warning("Failed to save papers to DB: %s", e)
 

@@ -53,15 +53,22 @@ class Paper(Base):
 
 
 class UserPaper(Base):
-    """Association: which user has parsed which paper."""
+    """User-paper relationship with typed access levels."""
     __tablename__ = "user_papers"
     __table_args__ = (
         UniqueConstraint("user_id", "paper_id", name="uq_user_paper"),
+        CheckConstraint(
+            "relation_type IN ('searched', 'parsed', 'uploaded', 'shared')",
+            name="ck_user_paper_relation_type",
+        ),
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
     paper_id = Column(String(255), ForeignKey("papers.id"), nullable=False, index=True)
+    relation_type = Column(String(20), nullable=False, default="searched", server_default="searched")
+    has_fulltext_access = Column(Boolean, nullable=False, default=False, server_default="false")
+    source = Column(String(30))  # paper_search | paper_parse | upload | share
     parsed_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     user = relationship("User")
     paper = relationship("Paper")

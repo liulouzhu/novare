@@ -44,8 +44,14 @@ def _user_papers_dir(user_id: str) -> str:
     return os.path.join(get_user_workspace(user_id), "papers")
 
 
-def associate_user_paper(user_id: str, paper_id: str):
-    """Create a user-paper association in PostgreSQL after parsing."""
+def associate_user_paper(
+    user_id: str,
+    paper_id: str,
+    relation_type: str = "parsed",
+    has_fulltext_access: bool = True,
+    source: str = "paper_parse",
+):
+    """Create or upgrade a user-paper association in PostgreSQL."""
     if not user_id:
         return
     try:
@@ -58,9 +64,23 @@ def associate_user_paper(user_id: str, paper_id: str):
                 UserPaper.user_id == UUID(user_id),
                 UserPaper.paper_id == paper_id,
             ).first()
-            if not existing:
-                db.add(UserPaper(user_id=UUID(user_id), paper_id=paper_id))
-                db.commit()
+            if existing:
+                # 升级：parsed 覆盖 searched，fulltext 只升不降
+                if existing.relation_type == "searched" and relation_type != "searched":
+                    existing.relation_type = relation_type
+                if has_fulltext_access and not existing.has_fulltext_access:
+                    existing.has_fulltext_access = True
+                if source:
+                    existing.source = source
+            else:
+                db.add(UserPaper(
+                    user_id=UUID(user_id),
+                    paper_id=paper_id,
+                    relation_type=relation_type,
+                    has_fulltext_access=has_fulltext_access,
+                    source=source,
+                ))
+            db.commit()
         finally:
             db.close()
     except Exception as e:

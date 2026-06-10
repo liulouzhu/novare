@@ -286,7 +286,12 @@ async def handle_paper_search(args: dict, user_id: str = None) -> str:
                 if user_id:
                     from tools.paper_parse import associate_user_paper
                     for paper in merged:
-                        associate_user_paper(user_id, paper["id"])
+                        associate_user_paper(
+                            user_id, paper["id"],
+                            relation_type="searched",
+                            has_fulltext_access=False,
+                            source="paper_search",
+                        )
         except Exception as e:
             logger.warning("Failed to save papers to DB: %s", e)
 
