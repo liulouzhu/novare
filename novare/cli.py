@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
+from pathlib import Path
 
-from novare.config import NovareConfig
+from novare.config import NovareConfig, get_user_workspace
 from novare.llm_client import LLMClient
 from novare.session import Session
 from novare.tools.registry import ToolRegistry, ToolDef
@@ -152,8 +154,13 @@ async def main():
         workspace=config.workspace,
     )
 
-    # 发现 Skills
-    skills = discover_skills(config.skill_dirs)
+    # 发现 Skills：系统公共 + 用户私有
+    skill_dirs = list(config.skill_dirs)
+    user_id = os.environ.get("NOVARE_USER_ID")
+    if user_id:
+        user_skill_dir = Path(get_user_workspace(user_id)) / ".novare" / "skills"
+        skill_dirs.insert(0, user_skill_dir)  # 用户私有优先级最高
+    skills = discover_skills(skill_dirs)
     skill_map: dict[str, Skill] = {s.name: s for s in skills}
 
     # 创建默认 session

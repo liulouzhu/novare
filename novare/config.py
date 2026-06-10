@@ -107,13 +107,13 @@ class NovareConfig:
         if not cfg.system_prompt:
             cfg.system_prompt = _default_system_prompt(cfg.workspace)
 
-        # Skill 目录：项目级 + 用户级
+        # Skill 目录：系统公共 + 用户私有（~/.novare/skills 兜底）
         skill_dirs_env = os.environ.get("NOVARE_SKILL_DIR")
         if skill_dirs_env:
             cfg.skill_dirs = [Path(p).resolve() for p in skill_dirs_env.split(os.pathsep)]
         else:
             cfg.skill_dirs = [
-                cfg.workspace / ".novare" / "skills",
+                project_root / "system" / "skills",
                 Path.home() / ".novare" / "skills",
             ]
 
