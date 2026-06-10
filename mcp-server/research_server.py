@@ -183,7 +183,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     if name == "paper_search":
         from tools.paper_search import handle_paper_search
-        result = await handle_paper_search(arguments)
+        result = await handle_paper_search(arguments, user_id=user_id)
         return [TextContent(type="text", text=result)]
 
     if name == "paper_parse":

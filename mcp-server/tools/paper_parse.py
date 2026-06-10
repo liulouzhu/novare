@@ -207,7 +207,7 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
             if not existing:
                 # 从 PDF 内容提取基本信息
                 title = _extract_title_from_markdown(markdown_text)
-                upsert_paper(conn, {
+                paper_data = {
                     "id": resolved_paper_id,
                     "title": title or resolved_paper_id,
                     "authors": [],
@@ -217,13 +217,18 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
                     "pdf_path": pdf_path,
                     "url": pdf_url,
                     "citation_count": 0,
-                })
+                }
+                # 本地上传文件 → private + 记录所有者
+                if is_local_file and user_id:
+                    paper_data["visibility"] = "private"
+                    paper_data["created_by_user_id"] = user_id
+                upsert_paper(conn, paper_data)
             else:
                 # 更新 pdf_path
-                conn.execute(
-                    "UPDATE papers SET pdf_path=? WHERE id=?",
-                    (pdf_path, resolved_paper_id),
-                )
+                from web.backend.db.models import Paper
+                existing_row = conn.query(Paper).filter(Paper.id == resolved_paper_id).first()
+                if existing_row:
+                    existing_row.pdf_path = pdf_path
 
         # 插入分块
         chunk_ids = insert_chunks(conn, resolved_paper_id, all_chunks)

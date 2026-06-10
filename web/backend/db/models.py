@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     Column, String, Integer, Text, Boolean, DateTime, Float, LargeBinary,
-    ForeignKey, UniqueConstraint, Index,
+    ForeignKey, UniqueConstraint, Index, CheckConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
@@ -31,8 +31,11 @@ class User(Base):
 
 
 class Paper(Base):
-    """Shared paper metadata — NOT user-scoped."""
+    """Shared paper metadata — public papers visible to all, private papers owner-only."""
     __tablename__ = "papers"
+    __table_args__ = (
+        CheckConstraint("visibility IN ('public', 'private')", name="ck_paper_visibility"),
+    )
 
     id = Column(String(255), primary_key=True)  # doi:xxx, arxiv:xxx, s2:xxx
     title = Column(Text, nullable=False)
@@ -43,6 +46,8 @@ class Paper(Base):
     pdf_path = Column(Text)
     url = Column(Text)
     citation_count = Column(Integer, default=0)
+    visibility = Column(String(10), nullable=False, default="public", server_default="public")
+    created_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 

@@ -257,7 +257,7 @@ def _format_results(papers: list[dict]) -> str:
     return "\n".join(lines)
 
 
-async def handle_paper_search(args: dict) -> str:
+async def handle_paper_search(args: dict, user_id: str = None) -> str:
     """论文检索入口"""
     query = args.get("query", "").strip()
     if not query:
@@ -275,12 +275,18 @@ async def handle_paper_search(args: dict) -> str:
     # 合并结果
     merged = _merge_results(s2_results, arxiv_results, limit)
 
-    # 写入数据库
+    # 写入数据库并关联用户
     if merged:
         try:
             with get_connection() as conn:
                 for paper in merged:
+                    paper["visibility"] = "public"
                     upsert_paper(conn, paper)
+                # 搜索到的论文自动关联到当前用户
+                if user_id:
+                    from tools.paper_parse import associate_user_paper
+                    for paper in merged:
+                        associate_user_paper(user_id, paper["id"])
         except Exception as e:
             logger.warning("Failed to save papers to DB: %s", e)
 

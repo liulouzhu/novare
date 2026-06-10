@@ -166,7 +166,7 @@ async def handle_innovation_search(arguments: dict, user_id: str = None) -> str:
             p["_relevance"] = _score_paper_relevance(p, query)
         papers.sort(key=lambda x: x["_relevance"], reverse=True)
 
-        # 保存到数据库
+        # 保存到数据库并关联用户
         try:
             with get_connection() as conn:
                 for p in papers:
@@ -181,7 +181,13 @@ async def handle_innovation_search(arguments: dict, user_id: str = None) -> str:
                             "pdf_path": None,
                             "url": None,
                             "citation_count": p.get("citation_count", 0),
+                            "visibility": "public",
                         })
+                if user_id:
+                    from tools.paper_parse import associate_user_paper
+                    for p in papers:
+                        if p.get("paper_id"):
+                            associate_user_paper(user_id, p["paper_id"])
         except Exception as e:
             logger.warning("Failed to save papers to DB: %s", e)
 

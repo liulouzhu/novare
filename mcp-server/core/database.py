@@ -72,6 +72,11 @@ def upsert_paper(conn, paper: dict) -> None:
             existing.citation_count = max(
                 existing.citation_count or 0, paper["citation_count"]
             )
+        # visibility / owner: only escalate, never downgrade
+        if paper.get("visibility") and existing.visibility != "private":
+            existing.visibility = paper["visibility"]
+        if paper.get("created_by_user_id") and not existing.created_by_user_id:
+            existing.created_by_user_id = paper["created_by_user_id"]
     else:
         conn.add(Paper(
             id=paper["id"],
@@ -83,6 +88,8 @@ def upsert_paper(conn, paper: dict) -> None:
             pdf_path=paper.get("pdf_path"),
             url=paper.get("url"),
             citation_count=paper.get("citation_count", 0),
+            visibility=paper.get("visibility", "public"),
+            created_by_user_id=paper.get("created_by_user_id"),
         ))
     conn.flush()
 

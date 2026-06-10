@@ -79,7 +79,12 @@ async def get_paper_pdf(
         if user is None:
             raise HTTPException(status_code=401, detail="Authentication required to access local PDF")
         user_paper_repo = UserPaperRepository(db, user.id)
-        if not user_paper_repo.has_parsed(paper_id):
+        is_owner = (
+            paper.visibility == "public"
+            or paper.created_by_user_id == user.id
+            or user_paper_repo.has_parsed(paper_id)
+        )
+        if not is_owner:
             raise HTTPException(status_code=403, detail="You do not have access to this paper's PDF")
         return FileResponse(
             paper.pdf_path,
@@ -114,17 +119,22 @@ async def list_papers(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """列出论文"""
+    """列出当前用户的论文（搜索 + 解析过的）"""
     paper_repo = PaperRepository(db)
     user_paper_repo = UserPaperRepository(db, user.id)
 
-    papers = paper_repo.get_all(q=q)
+    # 只返回该用户关联的论文（搜索或解析时自动创建 UserPaper）
+    user_paper_ids = set(user_paper_repo.get_user_papers())
+    if not user_paper_ids:
+        return []
 
-    parsed_ids = set(user_paper_repo.get_user_papers())
+    papers = paper_repo.get_all(q=q, user_id=user.id)
 
     result = []
     for p in papers:
-        parsed = p.id in parsed_ids
+        if p.id not in user_paper_ids:
+            continue
+        parsed = p.id in user_paper_ids
         if is_parsed is not None and parsed != is_parsed:
             continue
         result.append(_paper_to_out(p, parsed))
@@ -144,7 +154,7 @@ async def get_paper(
     paper_repo = PaperRepository(db)
     user_paper_repo = UserPaperRepository(db, user.id)
 
-    paper = paper_repo.get_by_id(paper_id)
+    paper = paper_repo.get_visible(paper_id, user.id)
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
 
@@ -160,13 +170,18 @@ async def get_paper_chunks(
 ):
     """获取论文的文本块"""
     paper_repo = PaperRepository(db)
-    paper = paper_repo.get_by_id(paper_id)
+    paper = paper_repo.get_visible(paper_id, user.id)
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
 
-    # 所有权校验：只有解析过该论文的用户才能查看 chunks
+    # 所有权校验：public 论文或拥有该 private 论文的用户才能查看 chunks
     user_paper_repo = UserPaperRepository(db, user.id)
-    if not user_paper_repo.has_parsed(paper_id):
+    is_owner = (
+        paper.visibility == "public"
+        or paper.created_by_user_id == user.id
+        or user_paper_repo.has_parsed(paper_id)
+    )
+    if not is_owner:
         raise HTTPException(status_code=403, detail="You do not have access to this paper's chunks")
 
     chunks = (
