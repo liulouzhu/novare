@@ -28,17 +28,20 @@ from core.mineru import parse_pdf_with_mineru
 logger = logging.getLogger("research-server.paper_parse")
 
 _GLOBAL_PAPERS_DIR = os.path.join(
-    os.environ.get("RESEARCH_DATA_DIR", "./data"), "papers",
+    os.environ.get("RESEARCH_DATA_DIR", "./data"), "public_papers",
 )
 DEFAULT_USER_ID = os.getenv("RAG_DEFAULT_USER", "default")
 
 
-def _papers_dir(user_id: str | None = None) -> str:
-    """返回论文 PDF 存储目录：有用户就走用户 workspace，否则走全局目录。"""
-    if user_id:
-        from novare.config import get_user_workspace
-        return os.path.join(get_user_workspace(user_id), "papers")
+def _public_papers_dir() -> str:
+    """全局公共 PDF 缓存（arxiv / S2 下载的论文）。"""
     return _GLOBAL_PAPERS_DIR
+
+
+def _user_papers_dir(user_id: str) -> str:
+    """用户私有 PDF 目录（用户上传的论文）。"""
+    from novare.config import get_user_workspace
+    return os.path.join(get_user_workspace(user_id), "papers")
 
 
 def associate_user_paper(user_id: str, paper_id: str):
@@ -105,15 +108,16 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
     if not paper_id and not pdf_url and not file_path:
         return "错误：请提供 paper_id、pdf_url 或 file_path。"
 
-    papers_dir = _papers_dir(user_id)
-    os.makedirs(papers_dir, exist_ok=True)
+    # 公共下载目录（所有用户共享）
+    public_dir = _public_papers_dir()
+    os.makedirs(public_dir, exist_ok=True)
 
     # 确定 PDF 来源
     pdf_path = None
     resolved_paper_id = paper_id
     is_local_file = False
 
-    # 本地文件
+    # 本地文件（用户上传）→ 存在用户私有目录
     if file_path:
         if not os.path.exists(file_path):
             return f"错误：文件不存在: {file_path}"
@@ -136,12 +140,11 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
                     if not pdf_url:
                         pdf_url = _try_get_s2_pdf_url(paper_id)
 
-    # 下载 PDF
+    # 下载 PDF（URL 来源 → 全局公共缓存）
     if not pdf_path:
         if pdf_url:
-            # 生成文件名
             safe_id = (resolved_paper_id or "unknown").replace("/", "_").replace(":", "_")
-            pdf_path = os.path.join(papers_dir, f"{safe_id}.pdf")
+            pdf_path = os.path.join(public_dir, f"{safe_id}.pdf")
             if not os.path.exists(pdf_path):
                 success = await _download_pdf(pdf_url, pdf_path)
                 if not success:
@@ -176,8 +179,8 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
             from core.pdf_parser import parse_pdf_to_markdown
             markdown_text = parse_pdf_to_markdown(pdf_path)
         else:
-            # URL 用 MinerU，保存到 papers 目录
-            save_dir = os.path.join(papers_dir, resolved_paper_id or "unknown")
+            # URL 用 MinerU，保存到公共 papers 目录
+            save_dir = os.path.join(public_dir, resolved_paper_id or "unknown")
             result = await parse_pdf_with_mineru(pdf_url, save_dir=save_dir)
             if not result.success:
                 return f"错误：MinerU 解析失败 - {result.error}"
