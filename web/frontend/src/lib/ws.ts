@@ -1,5 +1,15 @@
 /** WebSocket 事件类型定义 */
 
+// 任务状态结构
+export interface TaskState {
+  goal: string
+  completed: string[]
+  pending: string[]
+  tools_used: string[]
+  key_findings: string[]
+  missing_info: string[]
+}
+
 // 服务端 → 客户端
 export type ServerEvent =
   | { type: 'text_delta'; content: string }
@@ -7,6 +17,7 @@ export type ServerEvent =
   | { type: 'tool_start'; tool: string; params: Record<string, unknown> }
   | { type: 'tool_end'; tool: string; result: string; duration: number }
   | { type: 'tool_error'; tool: string; error: string }
+  | { type: 'task_state'; goal: string; completed: string[]; pending: string[]; tools_used: string[]; key_findings: string[]; missing_info: string[] }
   | { type: 'done'; usage?: Record<string, number> }
   | { type: 'error'; message: string }
 
@@ -32,6 +43,7 @@ export interface Message {
   role: 'user' | 'assistant' | 'system'
   content: string
   toolCalls?: ToolCallState[]
+  taskState?: TaskState
   isStreaming?: boolean
   timestamp: number
 }

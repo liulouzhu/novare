@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef } from 'react'
 import { useWebSocket } from './useWebSocket'
 import { useChatStore } from '@/stores/chatStore'
 import { useSessionStore } from '@/stores/sessionStore'
-import { type ServerEvent, type ToolCallState, type Message } from '@/lib/ws'
+import { type ServerEvent, type ToolCallState, type TaskState, type Message } from '@/lib/ws'
 import { generateId } from '@/lib/utils'
 import { fetchSession } from '@/lib/api'
 
@@ -82,6 +82,7 @@ export function useChat(sessionId: string) {
     appendText,
     addToolCall,
     updateToolCall,
+    updateTaskState,
     finishMessage,
     setStreaming,
     setMessages,
@@ -150,6 +151,19 @@ export function useChat(sessionId: string) {
         }
         break
 
+      case 'task_state':
+        if (assistantMsgId.current) {
+          updateTaskState(assistantMsgId.current, {
+            goal: event.goal,
+            completed: event.completed,
+            pending: event.pending,
+            tools_used: event.tools_used,
+            key_findings: event.key_findings,
+            missing_info: event.missing_info,
+          })
+        }
+        break
+
       case 'done':
         if (assistantMsgId.current) {
           finishMessage(assistantMsgId.current)
@@ -170,7 +184,7 @@ export function useChat(sessionId: string) {
         useSessionStore.getState().loadSessions()
         break
     }
-  }, [appendText, addToolCall, updateToolCall, finishMessage, setStreaming])
+  }, [appendText, addToolCall, updateToolCall, updateTaskState, finishMessage, setStreaming])
 
   const { connected, sendMessage } = useWebSocket({ sessionId, onEvent: handleEvent })
 

@@ -241,11 +241,16 @@ class AgentService:
             # 记录本轮前的消息数，用于提取新增消息
             msgs_before = len(session.messages)
 
+            # task state 推送回调
+            def on_task_state(state_dict: dict):
+                queue.put_nowait({"type": "task_state", **state_dict})
+
             result = await self.agent.run_turn(
                 session, user_input,
                 on_text=on_text,
                 on_tool=on_tool,
                 tool_context={"user_id": user_id} if user_id else None,
+                on_task_state=on_task_state,
             )
 
             # ── 持久化到 PostgreSQL（仅当 user_id 存在时） ──

@@ -2,6 +2,7 @@
 
 import { type Message } from '@/lib/ws'
 import { ToolCallCard } from './ToolCallCard'
+import { TaskStatePanel } from './TaskStatePanel'
 import { MarkdownRenderer } from '../shared/MarkdownRenderer'
 import { cn } from '@/lib/utils'
 import { User, Bot } from 'lucide-react'
@@ -47,6 +48,11 @@ export function MessageBubble({ message }: Props) {
               <ToolCallCard key={tc.id} toolCall={tc} />
             ))}
           </div>
+        )}
+
+        {/* 任务状态面板（工具调用之后、文本之前） */}
+        {!isUser && message.taskState && (
+          <TaskStatePanel taskState={message.taskState} />
         )}
 
         {/* 文本内容 */}

@@ -17,6 +17,7 @@ from novare.context_manager import (
     compact_messages,
     estimate_messages_tokens,
 )
+from novare.task_state import TaskState, TaskStateManager
 
 if TYPE_CHECKING:
     from novare.llm_client import LLMClient
@@ -67,6 +68,7 @@ class AgentLoop:
         on_text: Callable[[str], None] | None = None,
         on_tool: Callable[[str, str, dict, str | None, float | None], None] | None = None,
         tool_context: dict | None = None,
+        on_task_state: Callable[[dict], None] | None = None,
     ) -> str:
         """执行一轮对话：用户输入 → LLM（流式） → 工具循环 → 最终回答
 
@@ -74,71 +76,88 @@ class AgentLoop:
         on_tool: 可选回调，工具状态事件。
                  签名：(event, name, arguments, result_preview, duration_sec)
                  event: "start" | "end" | "error"
+        on_task_state: 可选回调，工具循环结束后推送当前任务状态快照。
+                       签名：(state_dict: dict)
         """
-        # 将 reviewer_llm 注入 tool_context，供 reviewer_evaluate 工具使用
-        if tool_context is None:
-            tool_context = {}
-        if self.reviewer_llm:
-            tool_context["reviewer_llm"] = self.reviewer_llm
+        # ── Turn-scoped TaskState：每次 run_turn 独立持有 ──
+        task_mgr = TaskStateManager()
+        task_mgr.init_turn(user_input)
 
-        session.add_user_message(user_input)
+        try:
+            # 将 reviewer_llm 注入 tool_context，供 reviewer_evaluate 工具使用
+            if tool_context is None:
+                tool_context = {}
+            if self.reviewer_llm:
+                tool_context["reviewer_llm"] = self.reviewer_llm
 
-        for iteration in range(self.max_iterations):
-            # 构建消息（可能已被压缩）
-            messages = self._build_messages(session)
+            session.add_user_message(user_input)
 
-            # 流式调用 LLM，on_text 实时输出
-            tools = self.tool_registry.to_openai_tools()
-            response = await self.llm_client.collect_stream(
-                messages, tools=tools, on_text=on_text,
-            )
+            for iteration in range(self.max_iterations):
+                # 构建消息（注入当前 task state，可能已被压缩）
+                messages = self._build_messages(session, task_state=task_mgr.state)
 
-            # 追踪 usage（用于触发自动压缩）
-            if response.usage:
-                self.usage_tracker.add(TokenUsage(
-                    input_tokens=response.usage.get("prompt_tokens", 0)
-                        or response.usage.get("input_tokens", 0),
-                    output_tokens=response.usage.get("completion_tokens", 0)
-                        or response.usage.get("output_tokens", 0),
-                ))
-                logger.debug("Usage: %s", self.usage_tracker.summary())
+                # 流式调用 LLM，on_text 实时输出
+                tools = self.tool_registry.to_openai_tools()
+                response = await self.llm_client.collect_stream(
+                    messages, tools=tools, on_text=on_text,
+                )
 
-            # 如果没有工具调用，检查是否需要压缩后返回
-            if not response.tool_calls:
-                session.add_assistant_message(response.content)
+                # 追踪 usage（用于触发自动压缩）
+                if response.usage:
+                    self.usage_tracker.add(TokenUsage(
+                        input_tokens=response.usage.get("prompt_tokens", 0)
+                            or response.usage.get("input_tokens", 0),
+                        output_tokens=response.usage.get("completion_tokens", 0)
+                            or response.usage.get("output_tokens", 0),
+                    ))
+                    logger.debug("Usage: %s", self.usage_tracker.summary())
+
+                # 如果没有工具调用，检查是否需要压缩后返回
+                if not response.tool_calls:
+                    session.add_assistant_message(response.content)
+                    self._maybe_auto_compact(session)
+                    return response.content
+
+                # 有工具调用：记录 assistant 消息（含 tool_calls）
+                tool_calls_dicts = [
+                    {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": json.dumps(tc.arguments, ensure_ascii=False)}}
+                    for tc in response.tool_calls
+                ]
+                session.add_assistant_message(response.content or "", tool_calls=tool_calls_dicts)
+
+                # 执行每个工具调用
+                for tc in response.tool_calls:
+                    logger.info("Tool call: %s(%s)", tc.name, tc.arguments)
+                    if on_tool:
+                        on_tool("start", tc.name, tc.arguments, None, None)
+                    t0 = time.monotonic()
+                    result = await self.tool_registry.execute(tc.name, tc.arguments, tool_context=tool_context)
+                    elapsed = time.monotonic() - t0
+                    # 检测工具执行错误
+                    is_error = result.startswith("Error") or result.startswith("错误") or result.startswith("搜索失败")
+                    if is_error:
+                        if on_tool:
+                            on_tool("error", tc.name, tc.arguments, result, elapsed)
+                    else:
+                        if on_tool:
+                            on_tool("end", tc.name, tc.arguments, result[:200], elapsed)
+                    session.add_tool_result(tc.id, result)
+                    logger.debug("Tool result: %s → %d chars", tc.name, len(result))
+
+                    # 更新 task state
+                    task_mgr.update_from_tool(tc.name, tc.arguments, result)
+
+                # 工具循环结束后推送 task state
+                if on_task_state and task_mgr.state:
+                    on_task_state(task_mgr.state.to_dict())
+
+                # 每轮工具循环结束后检查是否需要压缩
                 self._maybe_auto_compact(session)
-                return response.content
 
-            # 有工具调用：记录 assistant 消息（含 tool_calls）
-            tool_calls_dicts = [
-                {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": json.dumps(tc.arguments, ensure_ascii=False)}}
-                for tc in response.tool_calls
-            ]
-            session.add_assistant_message(response.content or "", tool_calls=tool_calls_dicts)
-
-            # 执行每个工具调用
-            for tc in response.tool_calls:
-                logger.info("Tool call: %s(%s)", tc.name, tc.arguments)
-                if on_tool:
-                    on_tool("start", tc.name, tc.arguments, None, None)
-                t0 = time.monotonic()
-                result = await self.tool_registry.execute(tc.name, tc.arguments, tool_context=tool_context)
-                elapsed = time.monotonic() - t0
-                # 检测工具执行错误
-                is_error = result.startswith("Error") or result.startswith("错误") or result.startswith("搜索失败")
-                if is_error:
-                    if on_tool:
-                        on_tool("error", tc.name, tc.arguments, result, elapsed)
-                else:
-                    if on_tool:
-                        on_tool("end", tc.name, tc.arguments, result[:200], elapsed)
-                session.add_tool_result(tc.id, result)
-                logger.debug("Tool result: %s → %d chars", tc.name, len(result))
-
-            # 每轮工具循环结束后检查是否需要压缩
-            self._maybe_auto_compact(session)
-
-        return "达到最大迭代次数（{}），请简化问题后重试。".format(self.max_iterations)
+            return "达到最大迭代次数（{}），请简化问题后重试。".format(self.max_iterations)
+        finally:
+            # 清理局部状态，避免异常时残留
+            task_mgr.clear()
 
     async def run_reviewer(
         self,
@@ -160,15 +179,22 @@ class AgentLoop:
         response = await self.reviewer_llm.collect_stream(messages, on_text=on_text)
         return response.content or ""
 
-    def _build_messages(self, session) -> list[dict]:
+    def _build_messages(self, session, task_state: TaskState | None = None) -> list[dict]:
         """构建发送给 LLM 的消息列表
+
+        task_state: 可选的任务状态，如果存在则追加到 system prompt 末尾。
+        每次迭代由 run_turn 传入当前 turn 的局部 task state。
 
         注意：session.messages 可能已被 _maybe_auto_compact() 压缩过，
         此处直接使用，不再重复裁剪。
         """
         messages = []
         if self.system_prompt:
-            messages.append({"role": "system", "content": self.system_prompt})
+            system_content = self.system_prompt
+            # 注入任务状态（如果有的话）
+            if task_state:
+                system_content += "\n\n" + task_state.to_prompt_block()
+            messages.append({"role": "system", "content": system_content})
         messages.extend(session.messages)
         return messages
 
