@@ -13,6 +13,8 @@ from novare.tools.registry import ToolRegistry, ToolDef
 from novare.mcp_client import McpClient
 from novare.agent_loop import AgentLoop
 from novare.skill import Skill, discover_skills
+from novare.subagents.registry import SubagentRegistry
+from novare.subagents.tools import register_subagent_tools
 
 
 # ── 工具状态显示 ────────────────────────────────────────────────────────────
@@ -140,6 +142,16 @@ async def main():
         system_prompt=config.system_prompt,
     )
 
+    # 初始化子智能体系统
+    subagent_registry = SubagentRegistry()
+    register_subagent_tools(
+        tool_registry=tool_registry,
+        subagent_registry=subagent_registry,
+        llm_client=llm_client,
+        system_prompt=config.system_prompt,
+        workspace=config.workspace,
+    )
+
     # 发现 Skills
     skills = discover_skills(config.skill_dirs)
     skill_map: dict[str, Skill] = {s.name: s for s in skills}
@@ -186,6 +198,16 @@ async def main():
                 session = Session(workspace=config.workspace)
                 print(f"New session: {session.session_id}")
                 continue
+            elif user_input == "/subagents":
+                records = subagent_registry.list_all()
+                if not records:
+                    print("No subagents running or completed.")
+                else:
+                    print(f"Subagents ({len(records)}):")
+                    for r in records:
+                        elapsed = f"{r.elapsed:.1f}s"
+                        print(f"  {r.subagent_id} [{r.status.value}] {r.type.value} · {elapsed} · {r.task[:50]}")
+                continue
             elif user_input == "/skills":
                 if not skill_map:
                     print("No skills found. Add .md files to .novare/skills/")
@@ -225,6 +247,10 @@ async def main():
                 logger.exception("Error in turn")
                 print(f"\nError: {e}")
     finally:
+        # 取消所有运行中的子智能体
+        cancelled = await subagent_registry.cancel_all()
+        if cancelled:
+            print(f"\nCancelled {cancelled} running subagent(s).")
         for client in mcp_clients:
             await client.close()
         await llm_client.close()
@@ -241,10 +267,12 @@ Novare 命令:
   /sessions      列出所有会话
   /session <id>  加载指定会话
   /new           创建新会话
+  /subagents     列出子智能体状态
   /exit          退出
 
 直接输入文字开始对话，Novare 会自动调用工具完成科研任务。
 输入 Skill 名称（如 research Transformer）可快速调用预设流程。
+子智能体会在后台自动运行，主智能体可通过 spawn_subagent 创建并行任务。
 """)
 
 

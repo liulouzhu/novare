@@ -1,11 +1,15 @@
-"""novare/agent_loop.py — 核心 agent 循环"""
+"""novare/agent_loop.py — 核心 agent 循环
+
+借鉴 claw-code 的 ConversationRuntime.run_turn() 模式，
+支持主智能体和子智能体共用同一循环（通过 duck typing 接受 ToolRegistry 或 SubagentToolExecutor）。
+"""
 
 from __future__ import annotations
 
 import json
 import logging
 import time
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
 
 from novare.context_manager import (
     UsageTracker,
@@ -16,18 +20,31 @@ from novare.context_manager import (
 
 if TYPE_CHECKING:
     from novare.llm_client import LLMClient
-    from novare.tools.registry import ToolRegistry
+
+
+@runtime_checkable
+class ToolExecutor(Protocol):
+    """工具执行器协议 — ToolRegistry 和 SubagentToolExecutor 都满足此接口"""
+
+    def to_openai_tools(self) -> list[dict]: ...
+
+    async def execute(self, name: str, arguments: dict, tool_context: dict | None = None) -> str: ...
 
 logger = logging.getLogger("novare.loop")
 
 
 class AgentLoop:
-    """等价于 Claw Code 的 ConversationRuntime.run_turn()"""
+    """等价于 Claw Code 的 ConversationRuntime.run_turn()
+
+    tool_registry 参数接受任何满足 ToolExecutor 协议的对象：
+    - ToolRegistry（主智能体，完整工具集）
+    - SubagentToolExecutor（子智能体，白名单受限工具集）
+    """
 
     def __init__(
         self,
         llm_client: LLMClient,
-        tool_registry: ToolRegistry,
+        tool_registry: ToolExecutor,
         system_prompt: str = "",
         max_iterations: int = 20,
         reviewer_llm: LLMClient | None = None,
@@ -35,7 +52,7 @@ class AgentLoop:
         preserve_recent_messages: int = 4,
     ):
         self.llm_client = llm_client
-        self.tool_registry = tool_registry
+        self.tool_registry: ToolExecutor = tool_registry
         self.system_prompt = system_prompt
         self.max_iterations = max_iterations
         self.reviewer_llm = reviewer_llm

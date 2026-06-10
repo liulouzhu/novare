@@ -21,6 +21,8 @@ from novare.llm_client import LLMClient  # noqa: E402
 from novare.mcp_client import McpClient  # noqa: E402
 from novare.session import Session, JsonlSessionStore  # noqa: E402
 from novare.tools.registry import ToolDef, ToolRegistry  # noqa: E402
+from novare.subagents.registry import SubagentRegistry  # noqa: E402
+from novare.subagents.tools import register_subagent_tools  # noqa: E402
 from web.backend.db.base import SessionLocal  # noqa: E402
 from web.backend.repositories import SessionRepository, MessageRepository  # noqa: E402
 from web.backend.memory_service import MemoryServiceAsync  # noqa: E402
@@ -38,6 +40,7 @@ class AgentService:
         self.tool_registry: ToolRegistry | None = None
         self.agent: AgentLoop | None = None
         self.memory_service: MemoryServiceAsync | None = None
+        self.subagent_registry: SubagentRegistry | None = None
         self._mcp_clients: list[McpClient] = []
 
     async def initialize(self):
@@ -103,6 +106,17 @@ class AgentService:
             auto_compact_threshold=self.config.auto_compact_threshold,
             preserve_recent_messages=self.config.preserve_recent_messages,
         )
+
+        # 初始化子智能体系统
+        self.subagent_registry = SubagentRegistry()
+        register_subagent_tools(
+            tool_registry=self.tool_registry,
+            subagent_registry=self.subagent_registry,
+            llm_client=self.llm_client,
+            system_prompt=self.config.system_prompt,
+            workspace=self.config.workspace,
+        )
+
         mode = "dual-model" if self.reviewer_llm else "single-model"
         logger.info(
             "AgentService initialized (model=%s, mode=%s, auto_compact=%d)",
@@ -111,6 +125,11 @@ class AgentService:
 
     async def shutdown(self):
         """关闭时清理资源"""
+        # 取消所有运行中的子智能体
+        if self.subagent_registry:
+            cancelled = await self.subagent_registry.cancel_all()
+            if cancelled:
+                logger.info("Cancelled %d running subagent(s)", cancelled)
         for client in self._mcp_clients:
             try:
                 await client.close()
