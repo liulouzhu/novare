@@ -111,6 +111,8 @@ def get_paper(conn, paper_id: str) -> Optional[dict]:
         "pdf_path": row.pdf_path,
         "url": row.url,
         "citation_count": row.citation_count,
+        "visibility": row.visibility,
+        "created_by_user_id": str(row.created_by_user_id) if row.created_by_user_id else None,
         "created_at": str(row.created_at) if row.created_at else None,
     }
 
