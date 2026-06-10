@@ -157,6 +157,12 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
         if resolved_paper_id:
             existing_chunks = get_chunks_by_paper(conn, resolved_paper_id)
             if existing_chunks:
+                # 可见性校验：private 论文只允许创建者关联
+                paper = get_paper(conn, resolved_paper_id)
+                if paper and paper.get("visibility") == "private":
+                    creator = paper.get("created_by_user_id")
+                    if creator and str(creator) != str(user_id):
+                        return f"错误：论文 {resolved_paper_id} 是私有论文，您无权访问。"
                 associate_user_paper(user_id, resolved_paper_id)
                 return (
                     f"论文 {resolved_paper_id} 已解析（{len(existing_chunks)} 个分块）。"
