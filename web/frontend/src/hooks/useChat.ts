@@ -136,7 +136,12 @@ export function useChat(sessionId: string) {
         if (assistantMsgId.current) {
           updateToolCall(assistantMsgId.current, event.tool, {
             status: 'success',
+            ok: event.ok,
+            summary: event.summary,
             result: event.result,
+            dataPreview: event.data_preview,
+            warnings: event.warnings,
+            sources: event.sources,
             duration: event.duration,
           })
         }
@@ -146,7 +151,11 @@ export function useChat(sessionId: string) {
         if (assistantMsgId.current) {
           updateToolCall(assistantMsgId.current, event.tool, {
             status: 'error',
+            ok: event.ok,
+            summary: event.summary,
             error: event.error,
+            dataPreview: event.data_preview,
+            warnings: event.warnings,
           })
         }
         break

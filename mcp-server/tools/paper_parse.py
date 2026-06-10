@@ -24,6 +24,7 @@ from core.pdf_parser import (
     extract_paper_ids_from_refs,
 )
 from core.mineru import parse_pdf_with_mineru
+from tools.result import ok, fail, truncate, MAX_SECTION_PREVIEW, MAX_SECTIONS, MAX_REFS, MAX_REF_LEN
 
 logger = logging.getLogger("research-server.paper_parse")
 
@@ -126,7 +127,7 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
     file_path = args.get("file_path")
 
     if not paper_id and not pdf_url and not file_path:
-        return "错误：请提供 paper_id、pdf_url 或 file_path。"
+        return fail("paper_parse", "请提供 paper_id、pdf_url 或 file_path。")
 
     # 公共下载目录（所有用户共享）
     public_dir = _public_papers_dir()
@@ -140,7 +141,7 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
     # 本地文件（用户上传）→ 存在用户私有目录
     if file_path:
         if not os.path.exists(file_path):
-            return f"错误：文件不存在: {file_path}"
+            return fail("paper_parse", f"文件不存在: {file_path}")
         pdf_path = file_path
         is_local_file = True
         if not resolved_paper_id:
@@ -168,12 +169,12 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
             if not os.path.exists(pdf_path):
                 success = await _download_pdf(pdf_url, pdf_path)
                 if not success:
-                    return f"错误：无法从 {pdf_url} 下载 PDF。"
+                    return fail("paper_parse", f"无法从 {pdf_url} 下载 PDF。")
         else:
-            return "错误：无法确定 PDF 来源。请提供 pdf_url。"
+            return fail("paper_parse", "无法确定 PDF 来源。请提供 pdf_url。")
 
     if not os.path.exists(pdf_path):
-        return f"错误：PDF 文件不存在: {pdf_path}"
+        return fail("paper_parse", f"PDF 文件不存在: {pdf_path}")
 
     # 检查是否已经解析过
     with get_connection() as conn:
@@ -185,11 +186,13 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
                 if paper and paper.get("visibility") == "private":
                     creator = paper.get("created_by_user_id")
                     if creator and str(creator) != str(user_id):
-                        return f"错误：论文 {resolved_paper_id} 是私有论文，您无权访问。"
+                        return fail("paper_parse", f"论文 {resolved_paper_id} 是私有论文，您无权访问。")
                 associate_user_paper(user_id, resolved_paper_id)
-                return (
-                    f"论文 {resolved_paper_id} 已解析（{len(existing_chunks)} 个分块）。"
-                    f"如需重新解析，请先删除相关数据。"
+                return ok(
+                    "paper_parse",
+                    {"paper_id": resolved_paper_id, "already_parsed": True, "chunk_count": len(existing_chunks)},
+                    summary=f"论文 {resolved_paper_id} 已解析（{len(existing_chunks)} 个分块）",
+                    warnings=["如需重新解析，请先删除相关数据"],
                 )
 
     # 解析 PDF
@@ -203,15 +206,15 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
             save_dir = os.path.join(public_dir, resolved_paper_id or "unknown")
             result = await parse_pdf_with_mineru(pdf_url, save_dir=save_dir)
             if not result.success:
-                return f"错误：MinerU 解析失败 - {result.error}"
+                return fail("paper_parse", f"MinerU 解析失败 - {result.error}")
             markdown_text = result.markdown
             if result.saved_dir:
                 logger.info("MinerU output saved to: %s", result.saved_dir)
     except Exception as e:
-        return f"错误：PDF 解析失败 - {str(e)}"
+        return fail("paper_parse", f"PDF 解析失败 - {str(e)}")
 
     if not markdown_text or len(markdown_text) < 100:
-        return "错误：PDF 解析结果为空或过短。"
+        return fail("paper_parse", "PDF 解析结果为空或过短。")
 
     # 按章节分割
     sections = split_into_sections(markdown_text)
@@ -228,7 +231,7 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
             })
 
     if not all_chunks:
-        return "错误：分块结果为空。"
+        return fail("paper_parse", "分块结果为空。")
 
     # 向量化
     try:
@@ -298,12 +301,6 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
     if resolved_paper_id:
         associate_user_paper(user_id, resolved_paper_id)
 
-    # 构建返回结果
-    section_summary = []
-    for sec in sections:
-        preview = sec["text"][:200].replace("\n", " ")
-        section_summary.append(f"  [{sec['section']}] {preview}...")
-
     # 自动构建知识图谱（从摘要提取实体）
     kg_result = ""
     if resolved_paper_id:
@@ -314,30 +311,51 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
         except Exception as e:
             logger.warning("Knowledge graph extraction failed: %s", e)
 
-    result_parts = [
-        f"✅ 论文解析完成: {resolved_paper_id}",
-        f"   PDF: {pdf_path}",
-        f"   章节数: {len(sections)}",
-        f"   分块数: {len(all_chunks)}",
-        f"   向量化: {'✅ 完成' if embeddings else '❌ 跳过'}",
-        f"   引用关系: {citations_added} 条",
-        "",
-        "## 章节结构",
-        *section_summary,
+    # 提取标题（供 sources 使用）
+    title = None
+    with get_connection() as conn:
+        if resolved_paper_id:
+            paper_row = get_paper(conn, resolved_paper_id)
+            if paper_row:
+                title = paper_row.get("title")
+
+    # 构建返回结果
+    sections_preview = [
+        {"name": sec["section"], "preview": truncate(sec["text"], MAX_SECTION_PREVIEW)}
+        for sec in sections[:MAX_SECTIONS]
     ]
+    references_preview = [truncate(ref, MAX_REF_LEN) for ref in refs[:MAX_REFS]]
 
-    if refs:
-        result_parts.append("")
-        result_parts.append(f"## 参考文献（前 10 条，共 {len(refs)} 条）")
-        for ref in refs[:10]:
-            result_parts.append(f"  - {ref[:150]}")
-
+    # 知识图谱结果处理：尝试解析为 dict，失败则保留原始文本
+    kg_stats = {}
+    kg_summary_text = ""
     if kg_result:
-        result_parts.append("")
-        result_parts.append(f"## 知识图谱")
-        result_parts.append(kg_result)
+        try:
+            import json
+            kg_stats = json.loads(kg_result)
+        except (json.JSONDecodeError, TypeError):
+            kg_summary_text = kg_result
 
-    return "\n".join(result_parts)
+    data = {
+        "paper_id": resolved_paper_id,
+        "pdf_path": pdf_path,
+        "section_count": len(sections),
+        "chunk_count": len(all_chunks),
+        "embedding_done": bool(embeddings),
+        "citations_count": citations_added,
+        "sections_preview": sections_preview,
+        "references_preview": references_preview,
+        "kg": kg_stats,
+    }
+    if kg_summary_text:
+        data["kg_summary"] = kg_summary_text
+
+    return ok(
+        "paper_parse",
+        data,
+        summary=f"论文 {resolved_paper_id} 解析完成：{len(sections)} 章节, {len(all_chunks)} 分块, {citations_added} 引用",
+        sources=[{"id": resolved_paper_id, "title": title or resolved_paper_id}],
+    )
 
 
 def _try_get_s2_pdf_url(paper_id: str) -> Optional[str]:

@@ -18,6 +18,7 @@ from novare.context_manager import (
     estimate_messages_tokens,
 )
 from novare.task_state import TaskState, TaskStateManager
+from novare.tool_result import parse_tool_result
 
 if TYPE_CHECKING:
     from novare.llm_client import LLMClient
@@ -133,14 +134,15 @@ class AgentLoop:
                     t0 = time.monotonic()
                     result = await self.tool_registry.execute(tc.name, tc.arguments, tool_context=tool_context)
                     elapsed = time.monotonic() - t0
-                    # 检测工具执行错误
-                    is_error = result.startswith("Error") or result.startswith("错误") or result.startswith("搜索失败")
+                    # 结构化错误检测（JSON ok 字段优先，降级到 startswith 兼容旧格式）
+                    parsed_result = parse_tool_result(result)
+                    is_error = not parsed_result.ok
                     if is_error:
                         if on_tool:
                             on_tool("error", tc.name, tc.arguments, result, elapsed)
                     else:
                         if on_tool:
-                            on_tool("end", tc.name, tc.arguments, result[:200], elapsed)
+                            on_tool("end", tc.name, tc.arguments, result, elapsed)
                     session.add_tool_result(tc.id, result)
                     logger.debug("Tool result: %s → %d chars", tc.name, len(result))
 

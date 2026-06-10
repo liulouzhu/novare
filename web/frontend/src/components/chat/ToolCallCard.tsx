@@ -26,17 +26,31 @@ export function ToolCallCard({ toolCall }: Props) {
   const [expanded, setExpanded] = useState(false)
 
   const label = TOOL_LABELS[toolCall.name] || `🔧 ${toolCall.name}`
+
+  // 摘要行：优先使用结构化 summary，降级到旧的 result 截断
+  const headline = toolCall.summary
+    || (toolCall.error ? toolCall.error.slice(0, 100) : '')
+    || (toolCall.result ? toolCall.result.slice(0, 100) : '')
+
+  // 状态判定：优先使用 ok 字段，降级到 status
+  const isOk = toolCall.ok !== undefined ? toolCall.ok : toolCall.status === 'success'
+
   const statusIcon = {
     running: <Loader2 size={14} className="animate-spin" style={{ color: 'var(--accent)' }} />,
-    success: <CheckCircle size={14} style={{ color: 'var(--success)' }} />,
+    success: <CheckCircle size={14} style={{ color: isOk ? 'var(--success)' : 'var(--error)' }} />,
     error: <XCircle size={14} style={{ color: 'var(--error)' }} />,
   }[toolCall.status]
 
   const borderColor = {
     running: 'var(--accent)',
-    success: 'var(--success)',
+    success: isOk ? 'var(--success)' : 'var(--error)',
     error: 'var(--error)',
   }[toolCall.status]
+
+  // 展开面板内容：优先使用 dataPreview（结构化），降级到 result/error
+  const detailContent = toolCall.dataPreview
+    ? JSON.stringify(toolCall.dataPreview, null, 2)
+    : toolCall.error || toolCall.result || ''
 
   return (
     <div
@@ -51,7 +65,12 @@ export function ToolCallCard({ toolCall }: Props) {
         {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         {statusIcon}
         <span className="font-medium" style={{ color: 'var(--text-primary)' }}>{label}</span>
-        <span className="text-xs ml-auto" style={{ color: 'var(--text-tertiary)' }}>
+        {headline && (
+          <span className="text-xs truncate ml-1" style={{ color: 'var(--text-tertiary)' }}>
+            {headline}
+          </span>
+        )}
+        <span className="text-xs ml-auto shrink-0" style={{ color: 'var(--text-tertiary)' }}>
           {toolCall.status === 'running' && '执行中...'}
           {toolCall.status === 'success' && toolCall.duration !== undefined && formatDuration(toolCall.duration)}
           {toolCall.status === 'error' && '失败'}
@@ -61,6 +80,18 @@ export function ToolCallCard({ toolCall }: Props) {
       {/* 展开内容 */}
       {expanded && (
         <div className="px-3 pb-3 space-y-3 border-t" style={{ borderColor: 'var(--border-color)' }}>
+          {/* warnings */}
+          {toolCall.warnings && toolCall.warnings.length > 0 && (
+            <div className="mt-3">
+              <div className="text-xs font-medium mb-1.5" style={{ color: 'var(--text-tertiary)' }}>⚠️ 警告</div>
+              <ul className="text-xs space-y-0.5">
+                {toolCall.warnings.map((w, i) => (
+                  <li key={i} style={{ color: 'var(--error)' }}>• {w}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {/* 参数 */}
           <div className="mt-3">
             <div className="text-xs font-medium mb-1.5 flex items-center gap-1" style={{ color: 'var(--text-tertiary)' }}>
@@ -74,18 +105,32 @@ export function ToolCallCard({ toolCall }: Props) {
             </pre>
           </div>
 
-          {/* 返回结果 */}
-          {(toolCall.result || toolCall.error) && (
+          {/* 返回结果 / 结构化数据 */}
+          {detailContent && (
             <div>
               <div className="text-xs font-medium mb-1.5 flex items-center gap-1" style={{ color: 'var(--text-tertiary)' }}>
-                {toolCall.status === 'error' ? '❌ 错误' : '📤 返回结果'}
+                {toolCall.status === 'error' || !isOk ? '❌ 错误' : '📤 返回结果'}
               </div>
               <pre
                 className="text-xs p-2.5 rounded-md overflow-x-auto max-h-60 overflow-y-auto whitespace-pre-wrap"
                 style={{ backgroundColor: 'var(--bg-tertiary)', color: 'var(--text-primary)' }}
               >
-                {toolCall.error || toolCall.result}
+                {detailContent}
               </pre>
+            </div>
+          )}
+
+          {/* sources */}
+          {toolCall.sources && toolCall.sources.length > 0 && (
+            <div>
+              <div className="text-xs font-medium mb-1.5" style={{ color: 'var(--text-tertiary)' }}>📚 引用来源</div>
+              <ul className="text-xs space-y-0.5">
+                {toolCall.sources.map((s, i) => (
+                  <li key={i} style={{ color: 'var(--text-secondary)' }}>
+                    • {s.title || s.id || JSON.stringify(s)}
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
 
@@ -93,7 +138,8 @@ export function ToolCallCard({ toolCall }: Props) {
           <div className="flex items-center gap-3 text-xs" style={{ color: 'var(--text-tertiary)' }}>
             <span>
               状态：
-              {toolCall.status === 'success' && '✅ 成功'}
+              {toolCall.status === 'success' && isOk && '✅ 成功'}
+              {toolCall.status === 'success' && !isOk && '❌ 失败'}
               {toolCall.status === 'error' && '❌ 失败'}
               {toolCall.status === 'running' && '⏳ 执行中'}
             </span>

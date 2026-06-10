@@ -7,6 +7,7 @@ import numpy as np
 
 from core.database import get_connection, get_all_embeddings
 from core.embedding import embed_text_async
+from tools.result import ok, fail, truncate, MAX_CHUNK_TEXT
 
 logger = logging.getLogger("research-server.rag_query")
 
@@ -115,10 +116,10 @@ def _milvus_search(query_vec: list[float], top_k: int, user_id: str) -> list[dic
 
 
 async def handle_rag_query(args: dict, user_id: str = None) -> str:
-    """RAG 语义检索入口 — Milvus 优先，brute-force fallback"""
+    """RAG 语义检索入口 — Milvus 优先，brute-force fallback。返回统一 JSON。"""
     question = args.get("question", "").strip()
     if not question:
-        return "错误：请提供查询问题。"
+        return fail("rag_query", "请提供查询问题。")
 
     top_k = args.get("top_k", 5)
 
@@ -127,7 +128,7 @@ async def handle_rag_query(args: dict, user_id: str = None) -> str:
         query_vec_list = await embed_text_async(question)
         query_vec = np.array(query_vec_list, dtype=np.float32)
     except Exception as e:
-        return f"错误：查询向量化失败 - {str(e)}"
+        return fail("rag_query", f"查询向量化失败 - {e}")
 
     top_results = []
     search_method = "brute-force"
@@ -145,30 +146,48 @@ async def handle_rag_query(args: dict, user_id: str = None) -> str:
         top_results = _brute_force_search(query_vec, top_k, user_id=user_id)
 
     if not top_results:
-        return "论文库为空。请先使用 paper_parse 解析至少一篇论文。"
+        return fail("rag_query", "论文库为空。请先使用 paper_parse 解析至少一篇论文。")
 
-    lines = [f"语义检索结果（Top {len(top_results)}）：\n"]
+    # ── 构建结构化结果 ──
+    results_json = []
+    sources = []
     for i, r in enumerate(top_results, 1):
-        snippet = r["text"][:480].replace("\n", " ")
-        lines.append(f"**#{i} | 相似度: {r['score']:.3f} | 论文: {r['title']}**")
-        lines.append(f"   章节: {r['section']} | 论文ID: {r['paper_id']}")
-        lines.append(f"   片段: {snippet}{'...' if len(r['text']) > 480 else ''}")
-        lines.append("")
+        results_json.append({
+            "rank": i,
+            "score": round(r["score"], 4),
+            "chunk_id": r["chunk_id"],
+            "paper_id": r["paper_id"],
+            "title": r["title"],
+            "section": r["section"],
+            "text": truncate(r.get("text", ""), MAX_CHUNK_TEXT),
+        })
+        sources.append({
+            "id": r["paper_id"],
+            "title": r["title"],
+            "section": r["section"],
+            "chunk_id": r["chunk_id"],
+        })
 
     unique_papers = len(set(r["paper_id"] for r in top_results))
 
-    # Count total chunks for the summary line
+    # Count total chunks
     if search_method == "Milvus":
-        total_chunks = len(top_results)  # Milvus doesn't expose total easily
+        total_chunks = len(top_results)
     else:
         with get_connection() as conn:
             all_embeddings = get_all_embeddings(conn)
         total_chunks = len(all_embeddings)
 
-    lines.append("---")
-    lines.append(
-        f"检索自 {total_chunks} 个文本分块，涉及 {unique_papers} 篇论文。"
-        f"（检索方式: {search_method}）"
+    return ok(
+        "rag_query",
+        {
+            "question": question,
+            "total_chunks_searched": total_chunks,
+            "unique_papers": unique_papers,
+            "search_method": search_method,
+            "results": results_json,
+        },
+        summary=f"检索到 {len(top_results)} 条相关片段（来自 {unique_papers} 篇论文, {total_chunks} 个分块）",
+        sources=sources,
+        providers=[search_method],
     )
-
-    return "\n".join(lines)

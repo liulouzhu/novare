@@ -21,6 +21,7 @@ from novare.llm_client import LLMClient  # noqa: E402
 from novare.mcp_client import McpClient  # noqa: E402
 from novare.session import Session, JsonlSessionStore  # noqa: E402
 from novare.tools.registry import ToolDef, ToolRegistry  # noqa: E402
+from novare.tool_result import parse_tool_result  # noqa: E402
 from novare.subagents.registry import SubagentRegistry  # noqa: E402
 from novare.subagents.tools import register_subagent_tools  # noqa: E402
 from web.backend.db.base import SessionLocal  # noqa: E402
@@ -211,18 +212,20 @@ class AgentService:
                     "tool": name,
                     "params": args,
                 })
-            elif event == "end":
+            elif event in ("end", "error"):
+                parsed = parse_tool_result(result or "")
+                # data_preview：结构化 data（前端展开用），JSON 工具直接取，旧格式为 None
+                data_preview = parsed.data if parsed.is_json else None
                 queue.put_nowait({
-                    "type": "tool_end",
+                    "type": "tool_end" if parsed.ok else "tool_error",
                     "tool": name,
-                    "result": result or "",
+                    "ok": parsed.ok,
+                    "summary": parsed.summary,
+                    "result": (result or "")[:500],
+                    "data_preview": data_preview,
+                    "warnings": parsed.warnings,
+                    "sources": parsed.sources,
                     "duration": round(duration or 0, 2),
-                })
-            elif event == "error":
-                queue.put_nowait({
-                    "type": "tool_error",
-                    "tool": name,
-                    "error": result or "Unknown error",
                 })
 
         try:

@@ -15,8 +15,8 @@ export type ServerEvent =
   | { type: 'text_delta'; content: string }
   | { type: 'reasoning_delta'; content: string }
   | { type: 'tool_start'; tool: string; params: Record<string, unknown> }
-  | { type: 'tool_end'; tool: string; result: string; duration: number }
-  | { type: 'tool_error'; tool: string; error: string }
+  | { type: 'tool_end'; tool: string; ok: boolean; summary: string; result: string; data_preview: unknown; warnings: string[]; sources: Array<Record<string, unknown>>; duration: number }
+  | { type: 'tool_error'; tool: string; ok: boolean; summary: string; error: string; data_preview: unknown; warnings: string[] }
   | { type: 'task_state'; goal: string; completed: string[]; pending: string[]; tools_used: string[]; key_findings: string[]; missing_info: string[] }
   | { type: 'done'; usage?: Record<string, number> }
   | { type: 'error'; message: string }
@@ -32,7 +32,12 @@ export interface ToolCallState {
   name: string
   params: Record<string, unknown>
   status: 'running' | 'success' | 'error'
+  ok?: boolean
+  summary?: string
   result?: string
+  dataPreview?: unknown
+  warnings?: string[]
+  sources?: Array<Record<string, unknown>>
   duration?: number
   error?: string
 }

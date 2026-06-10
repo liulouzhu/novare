@@ -15,6 +15,8 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 
+from novare.tool_result import parse_tool_result
+
 
 @dataclass
 class TaskState:
@@ -202,59 +204,106 @@ def _infer_pending_steps(user_input: str) -> list[str]:
 # ── 工具结果提取 ────────────────────────────────────────────
 
 def _handle_paper_search(state: TaskState, arguments: dict, result: str) -> None:
-    """处理 paper_search 结果"""
-    query = arguments.get("query", "")
-    # 提取论文数量
-    count_match = re.search(r"找到\s*(\d+)\s*篇|(\d+)\s*results?|共\s*(\d+)", result, re.IGNORECASE)
-    if count_match:
-        n = next(g for g in count_match.groups() if g)
-        step = f"搜索 '{query}' 找到 {n} 篇论文"
+    """处理 paper_search 结果 — JSON 优先，regex 降级"""
+    parsed = parse_tool_result(result)
+    if parsed.is_json and parsed.ok:
+        data = parsed.data or {}
+        total = data.get("total", 0)
+        query = data.get("query", arguments.get("query", ""))
+        _add_completion(state, f"搜索 '{query}' 找到 {total} 篇论文")
+        for paper in data.get("papers", [])[:5]:
+            title = paper.get("title", "")
+            if title:
+                _add_finding(state, title)
+        # 从 sources 提取引用来源
+        for src in parsed.sources[:3]:
+            title = src.get("title", "")
+            if title and title not in state.key_findings:
+                _add_finding(state, title)
     else:
-        step = f"搜索 '{query}'"
-    _add_completion(state, step)
-
-    # 提取论文标题
-    for match in re.findall(r'(?:Title|标题)[：:]\s*(.+?)(?:\n|$)', result):
-        title = match.strip()[:120]
-        if title:
-            state.key_findings.append(title)
-            if len(state.key_findings) > state._MAX_FINDINGS:
-                state.key_findings.pop(0)
+        # 降级：旧 regex 逻辑
+        _handle_paper_search_legacy(state, arguments, result)
 
 
 def _handle_paper_parse(state: TaskState, arguments: dict, result: str) -> None:
-    """处理 paper_parse 结果"""
+    """处理 paper_parse 结果 — JSON 优先，regex 降级"""
+    parsed = parse_tool_result(result)
     paper_id = arguments.get("paper_id", arguments.get("pdf_url", ""))
-    if "错误" in result or "Error" in result:
-        state.missing_info.append(f"解析 {paper_id} 失败")
+
+    if parsed.is_json:
+        if parsed.ok:
+            data = parsed.data or {}
+            pid = data.get("paper_id", paper_id)
+            _add_completion(state, f"解析论文 '{pid}'")
+            # 从 sources 提取标题
+            for src in parsed.sources[:2]:
+                title = src.get("title", "")
+                if title:
+                    _add_finding(state, f"已解析：{title}")
+        else:
+            state.missing_info.append(f"解析 {paper_id} 失败: {parsed.error or ''}")
     else:
-        _add_completion(state, f"解析论文 '{paper_id}'")
-        # 从解析结果中提取标题
-        title_match = re.search(r'(?:Title|标题)[：:]\s*(.+?)(?:\n|$)', result)
-        if title_match:
-            title = title_match.group(1).strip()[:120]
-            if title:
-                state.key_findings.append(f"已解析：{title}")
-                if len(state.key_findings) > state._MAX_FINDINGS:
-                    state.key_findings.pop(0)
+        # 降级
+        if "错误" in result or "Error" in result:
+            state.missing_info.append(f"解析 {paper_id} 失败")
+        else:
+            _add_completion(state, f"解析论文 '{paper_id}'")
+            title_match = re.search(r'(?:Title|标题)[：:]\s*(.+?)(?:\n|$)', result)
+            if title_match:
+                title = title_match.group(1).strip()[:120]
+                if title:
+                    _add_finding(state, f"已解析：{title}")
 
 
 def _handle_rag_query(state: TaskState, arguments: dict, result: str) -> None:
-    """处理 rag_query 结果"""
+    """处理 rag_query 结果 — JSON 优先，regex 降级"""
+    parsed = parse_tool_result(result)
     question = arguments.get("question", "")
     truncated_q = question[:60] + ("..." if len(question) > 60 else "")
-    _add_completion(state, f"语义检索 '{truncated_q}'")
+
+    if parsed.is_json and parsed.ok:
+        data = parsed.data or {}
+        n_results = len(data.get("results", []))
+        _add_completion(state, f"语义检索 '{truncated_q}' ({n_results} 条结果)")
+        # 从 sources 提取引用
+        for src in parsed.sources[:3]:
+            title = src.get("title", "")
+            section = src.get("section", "")
+            if title:
+                _add_finding(state, f"RAG: {title} [{section}]")
+    else:
+        _add_completion(state, f"语义检索 '{truncated_q}'")
 
 
 def _handle_knowledge_graph(state: TaskState, arguments: dict, result: str) -> None:
-    """处理 knowledge_graph 结果"""
+    """处理 knowledge_graph 结果 — JSON 优先，regex 降级"""
+    parsed = parse_tool_result(result)
     action = arguments.get("action", "query")
-    _add_completion(state, f"知识图谱操作: {action}")
+
+    if parsed.is_json and parsed.ok:
+        data = parsed.data or {}
+        _add_completion(state, f"知识图谱: {action}")
+        # 从 data 提取关系信息
+        for rel in data.get("relations", [])[:3]:
+            s = rel.get("subject", "")
+            p = rel.get("predicate", "")
+            o = rel.get("object", "")
+            if s and p and o:
+                _add_finding(state, f"{s} --[{p}]--> {o}")
+    else:
+        _add_completion(state, f"知识图谱操作: {action}")
 
 
 def _handle_code_execute(state: TaskState, arguments: dict, result: str) -> None:
-    """处理 code_execute 结果"""
-    _add_completion(state, "执行代码分析")
+    """处理 code_execute 结果 — JSON 优先，regex 降级"""
+    parsed = parse_tool_result(result)
+    if parsed.is_json:
+        if parsed.ok:
+            _add_completion(state, "执行代码分析")
+        else:
+            state.missing_info.append(f"代码执行失败: {parsed.error or ''}")
+    else:
+        _add_completion(state, "执行代码分析")
 
 
 def _handle_reviewer_evaluate(state: TaskState, arguments: dict, result: str) -> None:
@@ -263,12 +312,31 @@ def _handle_reviewer_evaluate(state: TaskState, arguments: dict, result: str) ->
 
 
 def _handle_innovation_search(state: TaskState, arguments: dict, result: str) -> None:
-    """处理 innovation_search 结果"""
+    """处理 innovation_search 结果 — JSON 优先，regex 降级"""
+    parsed = parse_tool_result(result)
     action = arguments.get("action", "landscape")
-    _add_completion(state, f"创新搜索: {action}")
+
+    if parsed.is_json and parsed.ok:
+        data = parsed.data or {}
+        total = data.get("total_papers", 0)
+        _add_completion(state, f"创新搜索: {action} ({total} 篇)")
+        for paper in data.get("papers", [])[:3]:
+            title = paper.get("title", "")
+            if title:
+                _add_finding(state, title)
+    else:
+        _add_completion(state, f"创新搜索: {action}")
 
 
 # ── 辅助函数 ────────────────────────────────────────────────
+
+def _add_finding(state: TaskState, finding: str) -> None:
+    """添加关键发现（去重 + FIFO 淘汰）"""
+    if finding and finding not in state.key_findings:
+        state.key_findings.append(finding)
+        if len(state.key_findings) > state._MAX_FINDINGS:
+            state.key_findings.pop(0)
+
 
 def _add_completion(state: TaskState, step: str) -> None:
     """添加已完成步骤（去重）"""
@@ -300,3 +368,22 @@ def _remove_from_pending(state: TaskState, completed_step: str) -> None:
                     state.pending.remove(pending)
                     break
             break
+
+
+# ── Legacy regex 降级 ────────────────────────────────────────
+
+def _handle_paper_search_legacy(state: TaskState, arguments: dict, result: str) -> None:
+    """paper_search 的旧 regex 提取逻辑（JSON parse 失败时的兜底）"""
+    query = arguments.get("query", "")
+    count_match = re.search(r"找到\s*(\d+)\s*篇|(\d+)\s*results?|共\s*(\d+)", result, re.IGNORECASE)
+    if count_match:
+        n = next(g for g in count_match.groups() if g)
+        step = f"搜索 '{query}' 找到 {n} 篇论文"
+    else:
+        step = f"搜索 '{query}'"
+    _add_completion(state, step)
+
+    for match in re.findall(r'(?:Title|标题)[：:]\s*(.+?)(?:\n|$)', result):
+        title = match.strip()[:120]
+        if title:
+            _add_finding(state, title)

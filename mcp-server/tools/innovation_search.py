@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from core.database import get_connection, upsert_paper
+from tools.result import ok, fail, truncate, MAX_ABSTRACT
 
 logger = logging.getLogger("research-server.innovation_search")
 
@@ -154,7 +155,7 @@ async def handle_innovation_search(arguments: dict, user_id: str = None) -> str:
     max_per_source = arguments.get("max_per_source", 8)
 
     if not topic and not keywords:
-        return "Error: topic or keywords required"
+        return fail("innovation_search", "topic or keywords required")
 
     if action == "landscape":
         # Stage 0: 文献景观扫描
@@ -196,48 +197,56 @@ async def handle_innovation_search(arguments: dict, user_id: str = None) -> str:
         except Exception as e:
             logger.warning("Failed to save papers to DB: %s", e)
 
-        result = {
-            "action": "landscape",
-            "topic": topic,
-            "total_papers": len(papers),
-            "papers": [
-                {
-                    "paper_id": p.get("paper_id", ""),
-                    "title": p.get("title", ""),
-                    "authors": p.get("authors", [])[:3],
-                    "abstract": (p.get("abstract", "") or "")[:300],
-                    "year": p.get("year"),
-                    "citation_count": p.get("citation_count", 0),
-                    "source": p.get("source", ""),
-                }
-                for p in papers[:30]
-            ],
-        }
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        papers_json = [
+            {
+                "paper_id": p.get("paper_id", ""),
+                "title": p.get("title", ""),
+                "authors": p.get("authors", [])[:10],
+                "abstract": truncate(p.get("abstract", "") or "", MAX_ABSTRACT),
+                "year": p.get("year"),
+                "citation_count": p.get("citation_count", 0),
+                "source": p.get("source", ""),
+            }
+            for p in papers[:30]
+        ]
+        sources = [{"id": p["paper_id"], "title": p.get("title", "")} for p in papers_json if p.get("paper_id")]
+        providers = list(set(p.get("source", "") for p in papers if p.get("source")))
+
+        return ok(
+            "innovation_search",
+            {"action": "landscape", "topic": topic, "total_papers": len(papers), "papers": papers_json},
+            summary=f"文献景观扫描 '{topic}' 找到 {len(papers)} 篇论文",
+            sources=sources,
+            providers=providers,
+        )
 
     elif action == "novelty_search":
         # Stage 2: 针对候选创新点的关键词搜索
         query = " OR ".join(keywords[:3]) if keywords else topic
         papers = await _search_multi_source(query, max_per_source)
 
-        result = {
-            "action": "novelty_search",
-            "query": query,
-            "total_papers": len(papers),
-            "papers": [
-                {
-                    "paper_id": p.get("paper_id", ""),
-                    "title": p.get("title", ""),
-                    "authors": p.get("authors", [])[:3],
-                    "abstract": (p.get("abstract", "") or "")[:300],
-                    "year": p.get("year"),
-                    "citation_count": p.get("citation_count", 0),
-                    "source": p.get("source", ""),
-                }
-                for p in papers[:15]
-            ],
-        }
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        papers_json = [
+            {
+                "paper_id": p.get("paper_id", ""),
+                "title": p.get("title", ""),
+                "authors": p.get("authors", [])[:10],
+                "abstract": truncate(p.get("abstract", "") or "", MAX_ABSTRACT),
+                "year": p.get("year"),
+                "citation_count": p.get("citation_count", 0),
+                "source": p.get("source", ""),
+            }
+            for p in papers[:15]
+        ]
+        sources = [{"id": p["paper_id"], "title": p.get("title", "")} for p in papers_json if p.get("paper_id")]
+        providers = list(set(p.get("source", "") for p in papers if p.get("source")))
+
+        return ok(
+            "innovation_search",
+            {"action": "novelty_search", "query": query, "total_papers": len(papers), "papers": papers_json},
+            summary=f"新颖性搜索 '{query}' 找到 {len(papers)} 篇相关论文",
+            sources=sources,
+            providers=providers,
+        )
 
     else:
-        return f"Error: unknown action '{action}'. Use 'landscape' or 'novelty_search'."
+        return fail("innovation_search", f"未知的 action '{action}'。使用 'landscape' 或 'novelty_search'。")

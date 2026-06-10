@@ -9,6 +9,7 @@ from typing import Optional
 import httpx
 
 from core.database import get_connection, upsert_paper
+from tools.result import ok, fail, truncate, MAX_ABSTRACT
 
 logger = logging.getLogger("research-server.paper_search")
 
@@ -231,7 +232,7 @@ def _merge_results(s2_results: list[dict], arxiv_results: list[dict], limit: int
 
 
 def _format_results(papers: list[dict]) -> str:
-    """格式化论文列表为可读文本"""
+    """格式化论文列表为可读文本（CLI 兼容保留，主路径走 JSON）"""
     if not papers:
         return "未找到相关论文。请尝试不同的搜索词。"
 
@@ -257,11 +258,26 @@ def _format_results(papers: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _build_paper_json(paper: dict) -> dict:
+    """将内部 paper dict 转为 JSON 输出格式（含大小截断）"""
+    authors = paper.get("authors", [])
+    return {
+        "paper_id": paper["id"],
+        "title": paper.get("title", ""),
+        "authors": authors[:10],
+        "year": paper.get("year"),
+        "abstract": truncate(paper.get("abstract", ""), MAX_ABSTRACT),
+        "citation_count": paper.get("citation_count", 0),
+        "url": paper.get("url", ""),
+        "pdf_url": paper.get("pdf_url"),
+    }
+
+
 async def handle_paper_search(args: dict, user_id: str = None) -> str:
-    """论文检索入口"""
+    """论文检索入口 — 返回统一 JSON 格式"""
     query = args.get("query", "").strip()
     if not query:
-        return "错误：请提供搜索关键词。"
+        return fail("paper_search", "请提供搜索关键词。")
 
     year_from = args.get("year_from")
     year_to = args.get("year_to")
@@ -295,13 +311,49 @@ async def handle_paper_search(args: dict, user_id: str = None) -> str:
         except Exception as e:
             logger.warning("Failed to save papers to DB: %s", e)
 
-    # 有结果就返回结果
-    if merged:
-        return _format_results(merged)
+    # ── 收集 providers 和 warnings ──
+    providers = []
+    warnings = []
+    if s2_results:
+        providers.append("semantic_scholar")
+    if s2_err:
+        warnings.append(f"Semantic Scholar: {s2_err}")
+    if arxiv_results:
+        providers.append("arxiv")
+    if arxiv_err:
+        warnings.append(f"arXiv: {arxiv_err}")
 
-    # 两个源都失败了，报告具体错误
+    # ── 构建 sources（证据来源） ──
+    sources = [
+        {"id": p["id"], "title": p.get("title", "")}
+        for p in merged
+    ]
+
+    # ── 返回结果 ──
+    if merged:
+        papers_json = [_build_paper_json(p) for p in merged]
+        return ok(
+            "paper_search",
+            {
+                "query": query,
+                "total": len(merged),
+                "papers": papers_json,
+            },
+            summary=f"搜索 '{query}' 找到 {len(merged)} 篇论文",
+            sources=sources,
+            providers=providers,
+            warnings=warnings,
+        )
+
+    # 两个源都失败了
     errors = [e for e in (s2_err, arxiv_err) if e]
     if errors:
-        return f"搜索失败，所有数据源均不可用：\n" + "\n".join(f"- {e}" for e in errors) + "\n请稍后重试。"
+        return fail("paper_search", f"搜索失败，所有数据源均不可用：{'; '.join(errors)}")
 
-    return "未找到相关论文。请尝试不同的搜索词。"
+    return ok(
+        "paper_search",
+        {"query": query, "total": 0, "papers": []},
+        summary=f"搜索 '{query}' 未找到相关论文",
+        providers=providers,
+        warnings=warnings or ["请尝试不同的搜索词"],
+    )
