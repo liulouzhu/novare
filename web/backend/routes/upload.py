@@ -8,11 +8,9 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from sqlalchemy.orm import Session
 
-from web.backend.app import agent_service
+from novare.config import get_user_workspace
 from web.backend.auth.dependencies import get_current_user
-from web.backend.db.base import get_db
 from web.backend.db.models import User
 from web.backend.models import UploadResponse
 
@@ -31,18 +29,16 @@ def _safe_filename(name: str) -> str:
 async def upload_file(
     file: UploadFile = File(...),
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
 ):
     """上传文件（PDF / 数据文件）
 
-    文件保存到 workspace/uploads/<user_id>/ 目录，返回本地路径供 paper_parse 使用。
+    文件保存到 workspace/<user_id>/uploads/ 目录，返回本地路径供 paper_parse 使用。
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename")
 
-    # 按用户隔离目录
-    workspace = agent_service.config.workspace if agent_service.config else Path("./workspace")
-    upload_dir = workspace / "uploads" / str(user.id)
+    # 使用统一的用户隔离 workspace
+    upload_dir = Path(get_user_workspace(str(user.id))) / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
 
     # 用 UUID 前缀防冲突 + 安全文件名防穿越

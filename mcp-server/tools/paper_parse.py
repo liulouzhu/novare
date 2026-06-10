@@ -27,9 +27,18 @@ from core.mineru import parse_pdf_with_mineru
 
 logger = logging.getLogger("research-server.paper_parse")
 
-PAPERS_DIR = os.environ.get("RESEARCH_DATA_DIR", "./data")
-PAPERS_DIR = os.path.join(PAPERS_DIR, "papers")
+_GLOBAL_PAPERS_DIR = os.path.join(
+    os.environ.get("RESEARCH_DATA_DIR", "./data"), "papers",
+)
 DEFAULT_USER_ID = os.getenv("RAG_DEFAULT_USER", "default")
+
+
+def _papers_dir(user_id: str | None = None) -> str:
+    """返回论文 PDF 存储目录：有用户就走用户 workspace，否则走全局目录。"""
+    if user_id:
+        from novare.config import get_user_workspace
+        return os.path.join(get_user_workspace(user_id), "papers")
+    return _GLOBAL_PAPERS_DIR
 
 
 def associate_user_paper(user_id: str, paper_id: str):
@@ -96,7 +105,8 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
     if not paper_id and not pdf_url and not file_path:
         return "错误：请提供 paper_id、pdf_url 或 file_path。"
 
-    os.makedirs(PAPERS_DIR, exist_ok=True)
+    papers_dir = _papers_dir(user_id)
+    os.makedirs(papers_dir, exist_ok=True)
 
     # 确定 PDF 来源
     pdf_path = None
@@ -131,7 +141,7 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
         if pdf_url:
             # 生成文件名
             safe_id = (resolved_paper_id or "unknown").replace("/", "_").replace(":", "_")
-            pdf_path = os.path.join(PAPERS_DIR, f"{safe_id}.pdf")
+            pdf_path = os.path.join(papers_dir, f"{safe_id}.pdf")
             if not os.path.exists(pdf_path):
                 success = await _download_pdf(pdf_url, pdf_path)
                 if not success:
@@ -161,7 +171,7 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
             markdown_text = parse_pdf_to_markdown(pdf_path)
         else:
             # URL 用 MinerU，保存到 papers 目录
-            save_dir = os.path.join(PAPERS_DIR, resolved_paper_id or "unknown")
+            save_dir = os.path.join(papers_dir, resolved_paper_id or "unknown")
             result = await parse_pdf_with_mineru(pdf_url, save_dir=save_dir)
             if not result.success:
                 return f"错误：MinerU 解析失败 - {result.error}"
