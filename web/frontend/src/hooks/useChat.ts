@@ -24,7 +24,19 @@ function convertBackendMessages(raw: Array<{ role: string; content: string; tool
           if (m.role === 'assistant' && m.toolCalls) {
             const idx = m.toolCalls.findIndex((t) => t.name === tc.name && t.status === 'running')
             if (idx !== -1) {
-              const isError = msg.content.startsWith('Error') || msg.content.startsWith('错误') || msg.content.startsWith('搜索失败')
+              // 与后端 tool_result.py 一致的错误检测：先解析 JSON 的 ok 字段，再降级到前缀匹配
+              let isError = false
+              try {
+                const parsed = JSON.parse(msg.content)
+                if (typeof parsed === 'object' && parsed !== null && 'ok' in parsed) {
+                  isError = !parsed.ok
+                }
+              } catch {
+                isError =
+                  msg.content.startsWith('Error') ||
+                  msg.content.startsWith('错误') ||
+                  msg.content.startsWith('搜索失败')
+              }
               m.toolCalls[idx] = {
                 ...m.toolCalls[idx],
                 status: isError ? 'error' : 'success',
