@@ -13,6 +13,7 @@ ALLOWED_PATHS = ("/data/", "/output/")
 MAX_OUTPUT_BYTES = 1 * 1024 * 1024  # 1MB
 TIMEOUT_SECONDS = int(os.environ.get("TIMEOUT_SECONDS", 60))
 _original_open = builtins.open  # captured at import time
+_original_exec = builtins.exec  # keep executor internals working after builtins are restricted
 
 
 def restricted_open(path, *args, **kwargs):
@@ -68,7 +69,7 @@ def main():
                 delattr(builtins, name)
 
         try:
-            exec(code, {"__builtins__": builtins})
+            _original_exec(code, {"__builtins__": builtins})
         except Exception:
             traceback.print_exc(file=captured_err)
         finally:
