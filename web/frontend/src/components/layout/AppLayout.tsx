@@ -7,6 +7,7 @@ import { ChatArea } from '../chat/ChatArea'
 import { WelcomeScreen } from '../chat/WelcomeScreen'
 import { PaperLibraryPage } from '../pages/PaperLibraryPage'
 import { KnowledgeGraphPage } from '../pages/KnowledgeGraphPage'
+import { MemoryPage } from '../pages/MemoryPage'
 import { useSessionStore } from '@/stores/sessionStore'
 
 export function AppLayout() {
@@ -20,6 +21,8 @@ export function AppLayout() {
         return <PaperLibraryPage />
       case 'graph':
         return <KnowledgeGraphPage />
+      case 'memory':
+        return <MemoryPage />
       case 'chat':
       default:
         return currentId ? (

@@ -30,6 +30,9 @@ from web.backend.memory_service import MemoryServiceAsync  # noqa: E402
 
 logger = logging.getLogger("novare.web")
 
+# 后台任务引用集合，防止 asyncio.create_task 的 task 被 GC 回收
+_background_tasks: set[asyncio.Task] = set()
+
 
 class AgentService:
     """管理 Agent 生命周期，提供 run_turn 桥接方法"""
@@ -298,18 +301,24 @@ class AgentService:
             # ── 持久化到 JSONL（agent loop 需要） ──
             session.save()
 
-            # ── 对话结束后自动提取长期记忆 ──
+            # ── 先通知客户端完成，记忆提取放后台不阻塞 ──
+            await queue.put({"type": "done"})
+
             if user_id and self.memory_service and self.llm_client:
                 try:
-                    await self.memory_service.extract_and_save(
-                        user_id=user_id,
-                        messages=session.messages,
-                        llm_client=self.llm_client,
+                    _bg = asyncio.create_task(
+                        self.memory_service.extract_and_save(
+                            user_id=user_id,
+                            messages=new_messages,
+                            llm_client=self.llm_client,
+                        )
                     )
+                    _bg.add_done_callback(lambda t: t.exception() or None)  # 防止未 await 警告
+                    _background_tasks.add(_bg)
+                    _bg.add_done_callback(_background_tasks.discard)
                 except Exception:
-                    logger.warning("Memory extraction failed (non-fatal)")
+                    logger.warning("Memory extraction scheduling failed (non-fatal)")
 
-            await queue.put({"type": "done"})
             return result
         except asyncio.CancelledError:
             logger.info("run_turn cancelled by user")

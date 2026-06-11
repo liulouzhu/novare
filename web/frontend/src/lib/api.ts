@@ -187,3 +187,54 @@ export async function fetchGraphStats(): Promise<GraphStats> {
   if (!res.ok) { handleAuthError(res); throw new Error('Failed to fetch graph stats') }
   return res.json()
 }
+
+// ── Memories ──
+
+export interface MemoryItem {
+  id: number
+  category: string
+  key: string
+  value: string
+  confidence: number
+  pinned: boolean
+  tags: string[]
+  source: string
+  created_at: string | null
+  updated_at: string | null
+}
+
+export async function fetchMemories(): Promise<MemoryItem[]> {
+  const res = await fetch(`${BASE}/api/memories`, { headers: authHeaders() })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to fetch memories') }
+  return res.json()
+}
+
+export async function updateMemory(id: number, data: { value?: string; tags?: string[]; confidence?: number }): Promise<MemoryItem> {
+  const res = await fetch(`${BASE}/api/memories/${id}`, {
+    method: 'PATCH',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to update memory') }
+  return res.json()
+}
+
+export async function deleteMemory(id: number): Promise<void> {
+  const res = await fetch(`${BASE}/api/memories/${id}`, { method: 'DELETE', headers: authHeaders() })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to delete memory') }
+}
+
+export async function clearMemories(): Promise<{ deleted: number }> {
+  const res = await fetch(`${BASE}/api/memories`, { method: 'DELETE', headers: authHeaders() })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to clear memories') }
+  return res.json()
+}
+
+export async function togglePin(id: number): Promise<MemoryItem> {
+  const res = await fetch(`${BASE}/api/memories/${id}/pin`, {
+    method: 'PATCH',
+    headers: authHeaders(),
+  })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to toggle pin') }
+  return res.json()
+}

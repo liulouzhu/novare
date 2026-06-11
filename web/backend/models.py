@@ -64,3 +64,24 @@ class UploadResponse(BaseModel):
     filename: str
     file_path: str
     message: str
+
+
+# ── Memory ─────────────────────────────────────────────────
+
+class MemoryOut(BaseModel):
+    id: int
+    category: str
+    key: str
+    value: str
+    confidence: float
+    pinned: bool
+    tags: list[str] = Field(default_factory=list)
+    source: str = "auto"
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class MemoryUpdate(BaseModel):
+    value: str | None = None
+    tags: list[str] | None = None
+    confidence: float | None = None

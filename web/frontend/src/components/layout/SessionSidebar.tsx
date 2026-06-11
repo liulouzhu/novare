@@ -4,10 +4,10 @@ import { useEffect, useState } from 'react'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useThemeStore } from '@/stores/themeStore'
 import { cn } from '@/lib/utils'
-import { Plus, Trash2, MessageSquare, Loader2, Sun, Moon, X, FileText, Network, ChevronDown, ChevronRight, LogOut, Pencil } from 'lucide-react'
+import { Plus, Trash2, MessageSquare, Loader2, Sun, Moon, X, FileText, Network, ChevronDown, ChevronRight, LogOut, Pencil, Brain } from 'lucide-react'
 import { useAuthStore } from '@/stores/authStore'
 
-export type PageKey = 'chat' | 'papers' | 'graph'
+export type PageKey = 'chat' | 'papers' | 'graph' | 'memory'
 
 interface Props {
   activePage: PageKey
@@ -104,6 +104,7 @@ export function SessionSidebar({ activePage, onNavigate }: Props) {
           { key: 'chat' as PageKey, icon: <MessageSquare size={15} />, label: '对话' },
           { key: 'papers' as PageKey, icon: <FileText size={15} />, label: '论文库' },
           { key: 'graph' as PageKey, icon: <Network size={15} />, label: '知识图谱' },
+          { key: 'memory' as PageKey, icon: <Brain size={15} />, label: '记忆管理' },
         ]).map((item) => (
           <button
             key={item.key}
