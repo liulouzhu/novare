@@ -61,6 +61,7 @@ async def run_subagent(
     max_iterations: int = 16,
     context: dict | None = None,
     on_tool: Callable | None = None,
+    tool_context: dict | None = None,
 ) -> str:
     """执行子智能体任务
 
@@ -78,6 +79,7 @@ async def run_subagent(
         max_iterations: 最大工具调用轮次
         context: 额外上下文（如论文 ID 列表）
         on_tool: 工具状态回调
+        tool_context: 传递给子智能体工具的上下文（如 user_id，用于多用户隔离）
 
     Returns:
         子智能体的最终文本输出
@@ -110,7 +112,7 @@ async def run_subagent(
 
         # 6. 执行
         logger.info("Running subagent %s (type=%s, max_iter=%d)", subagent_id, subagent_type.value, max_iterations)
-        result = await loop.run_turn(session, task, on_tool=on_tool)
+        result = await loop.run_turn(session, task, on_tool=on_tool, tool_context=tool_context)
 
         # 7. 统计工具调用次数
         tool_calls = sum(1 for m in session.messages if m.get("role") == "tool")

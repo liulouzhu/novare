@@ -60,6 +60,7 @@ async def handle_spawn_subagent(args: dict, **kwargs) -> str:
     parent_registry: ToolRegistry = kwargs.get("parent_tool_registry")
     llm_client: LLMClient = kwargs.get("llm_client")
     system_prompt: str = kwargs.get("system_prompt", "")
+    user_id: str | None = kwargs.get("user_id")
 
     if not all([registry, parent_registry, llm_client]):
         return json.dumps({"error": "子智能体系统未正确初始化"}, ensure_ascii=False)
@@ -78,6 +79,7 @@ async def handle_spawn_subagent(args: dict, **kwargs) -> str:
         registry=registry,
         max_iterations=max_iterations,
         context=context,
+        tool_context={"user_id": user_id} if user_id else None,
     )
 
     if await_result:
