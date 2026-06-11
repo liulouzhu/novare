@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 import io
 import tarfile
@@ -57,7 +58,9 @@ class DockerSandboxManager:
             pass
 
         # Create new container with security constraints
-        workspace = f"data/workspaces/{user_id}"
+        # Use absolute path so Docker treats it as a bind mount, not a named volume
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+        workspace = os.path.join(base_dir, "data", "workspaces", user_id)
         container = self.client.containers.run(
             IMAGE,
             detach=True,
