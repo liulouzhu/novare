@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
 
+from novare.context_manager import UsageTracker
 from sqlalchemy import func
 from sqlalchemy.orm import Session as SaSession
 
@@ -43,6 +44,7 @@ class Session:
         self.session_id = session_id or self._generate_id()
         self.workspace = workspace
         self.messages: list[dict] = []
+        self.usage_tracker = UsageTracker()
         self._dir = workspace / ".novare" / "sessions"
 
     @staticmethod

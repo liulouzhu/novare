@@ -13,10 +13,10 @@ import time
 from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
 
 from novare.context_manager import (
-    UsageTracker,
     TokenUsage,
     compact_messages,
     estimate_messages_tokens,
+    estimate_tools_tokens,
 )
 from novare.task_state import TaskState, TaskStateManager
 from novare.tool_result import parse_tool_result
@@ -60,7 +60,6 @@ class AgentLoop:
         self.system_prompt = system_prompt
         self.max_iterations = max_iterations
         self.reviewer_llm = reviewer_llm
-        self.usage_tracker = UsageTracker()
         self.auto_compact_threshold = auto_compact_threshold
         self.preserve_recent_messages = preserve_recent_messages
         self.turn_timeout = turn_timeout
@@ -122,6 +121,10 @@ class AgentLoop:
                 # 构建消息（注入当前 task state，可能已被压缩）
                 messages = self._build_messages(session, task_state=task_mgr.state)
 
+                # Preflight：估算 system + messages + tools 是否超过阈值，超过则先压缩
+                if self._preflight_compact(session, messages, task_mgr.state):
+                    messages = self._build_messages(session, task_state=task_mgr.state)
+
                 # 流式调用 LLM，on_text 实时输出
                 tools = self.tool_registry.to_openai_tools()
                 response = await self.llm_client.collect_stream(
@@ -130,13 +133,13 @@ class AgentLoop:
 
                 # 追踪 usage（用于触发自动压缩）
                 if response.usage:
-                    self.usage_tracker.add(TokenUsage(
+                    session.usage_tracker.add(TokenUsage(
                         input_tokens=response.usage.get("prompt_tokens", 0)
                             or response.usage.get("input_tokens", 0),
                         output_tokens=response.usage.get("completion_tokens", 0)
                             or response.usage.get("output_tokens", 0),
                     ))
-                    logger.debug("Usage: %s", self.usage_tracker.summary())
+                    logger.debug("Usage: %s", session.usage_tracker.summary())
 
                 # 如果没有工具调用，检查是否需要压缩后返回
                 if not response.tool_calls:
@@ -225,6 +228,45 @@ class AgentLoop:
         messages.extend(session.messages)
         return messages
 
+    def _preflight_compact(self, session, messages: list[dict], task_state: TaskState | None = None) -> bool:
+        """LLM 调用前的预检：估算 system + messages + tools 总量，超过阈值则先压缩。
+
+        解决的问题：post-turn 压缩来不及——如果单次请求本身已超上下文窗口，
+        API 会直接报错，根本走不到 _maybe_auto_compact()。
+
+        使用启发式估算（estimate_*），阈值取 auto_compact_threshold 的 80%
+        留安全余量，因为启发式会低估 tool schema / framing 的真实开销。
+        """
+        if self.auto_compact_threshold <= 0:
+            return False
+
+        preflight_threshold = int(self.auto_compact_threshold * 0.8)
+        tools = self.tool_registry.to_openai_tools()
+        estimated = estimate_messages_tokens(messages) + estimate_tools_tokens(tools)
+
+        if estimated < preflight_threshold:
+            return False
+
+        logger.info(
+            "Preflight compact triggered: estimated=%d (messages=%d, tools=%d), threshold=%d",
+            estimated, estimate_messages_tokens(messages), estimate_tools_tokens(tools), preflight_threshold,
+        )
+
+        compacted, did_compact = compact_messages(
+            session.messages,
+            self.system_prompt,
+            preserve_recent=self.preserve_recent_messages,
+        )
+
+        if did_compact:
+            session.messages = compacted
+            session.usage_tracker.reset_after_compact()
+            session.save()
+            logger.info("Preflight compaction complete: %d messages remain", len(compacted))
+            return True
+
+        return False
+
     def _maybe_auto_compact(self, session) -> bool:
         """检查是否需要自动压缩，如果需要则执行压缩
 
@@ -235,14 +277,14 @@ class AgentLoop:
         if self.auto_compact_threshold <= 0:
             return False
 
-        if not self.usage_tracker.should_compact(self.auto_compact_threshold):
+        if not session.usage_tracker.should_compact(self.auto_compact_threshold):
             return False
 
         # 检查消息数量是否足够压缩
         estimated_tokens = estimate_messages_tokens(session.messages)
         logger.info(
             "Auto-compact triggered: cumulative_input=%d, estimated_tokens=%d, messages=%d",
-            self.usage_tracker.cumulative_input, estimated_tokens, len(session.messages),
+            session.usage_tracker.cumulative_input, estimated_tokens, len(session.messages),
         )
 
         # 已经压缩过的消息（带 _compacted 标记）算作已压缩部分
@@ -258,7 +300,7 @@ class AgentLoop:
             # 持久化压缩后的版本到 JSONL
             session.save()
             # 重置 usage 计数器，避免重复触发
-            self.usage_tracker.reset_after_compact()
+            session.usage_tracker.reset_after_compact()
             new_tokens = estimate_messages_tokens(compacted)
             logger.info(
                 "Compaction complete: %d → %d messages, ~%d tokens saved",

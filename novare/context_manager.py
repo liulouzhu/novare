@@ -57,6 +57,18 @@ def estimate_messages_tokens(messages: list[dict]) -> int:
     return sum(estimate_message_tokens(m) for m in messages)
 
 
+def estimate_tools_tokens(tools: list[dict]) -> int:
+    """估算工具定义（OpenAI function schema）的 token 开销
+
+    将每个 tool 的 JSON 序列化后做启发式估算。
+    """
+    import json
+    total = 0
+    for t in tools:
+        total += estimate_tokens(json.dumps(t, ensure_ascii=False))
+    return total
+
+
 # ── Usage 追踪 ────────────────────────────────────────────────
 
 @dataclass
