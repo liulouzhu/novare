@@ -311,6 +311,9 @@ class AgentService:
 
             await queue.put({"type": "done"})
             return result
+        except asyncio.CancelledError:
+            logger.info("run_turn cancelled by user")
+            raise
         except Exception as e:
             logger.exception("run_turn failed")
             error_msg = str(e)

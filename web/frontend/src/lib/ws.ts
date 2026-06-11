@@ -25,6 +25,7 @@ export type ServerEvent =
 export type ClientMessage =
   | { type: 'send'; content: string }
   | { type: 'send_with_refs'; content: string; references: Array<{ type: string; id: string; title?: string }> }
+  | { type: 'stop' }
 
 // 工具调用状态
 export interface ToolCallState {

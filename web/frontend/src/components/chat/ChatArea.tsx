@@ -13,7 +13,7 @@ interface Props {
 }
 
 export function ChatArea({ sessionId, panelOpen, onTogglePanel }: Props) {
-  const { messages, isStreaming, connected, send } = useChat(sessionId)
+  const { messages, isStreaming, connected, send, stop } = useChat(sessionId)
   const scrollRef = useRef<HTMLDivElement>(null)
   const autoScrollRef = useRef(true)
 
@@ -82,7 +82,7 @@ export function ChatArea({ sessionId, panelOpen, onTogglePanel }: Props) {
       </div>
 
       {/* 输入框 */}
-      <InputBox onSend={send} disabled={isStreaming} />
+      <InputBox onSend={send} onStop={stop} disabled={isStreaming} />
     </div>
   )
 }

@@ -108,6 +108,15 @@ export async function deleteSession(sessionId: string): Promise<void> {
   if (!res.ok) { handleAuthError(res); throw new Error('Failed to delete session') }
 }
 
+export async function renameSession(sessionId: string, title: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/sessions/${sessionId}`, {
+    method: 'PATCH',
+    headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to rename session') }
+}
+
 // ── Papers ──
 
 export async function fetchPapers(params?: { q?: string; is_parsed?: boolean }): Promise<Paper[]> {

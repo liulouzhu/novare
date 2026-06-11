@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { useSessionStore } from '@/stores/sessionStore'
 import { useThemeStore } from '@/stores/themeStore'
 import { cn } from '@/lib/utils'
-import { Plus, Trash2, MessageSquare, Loader2, Sun, Moon, X, FileText, Network, ChevronDown, ChevronRight, LogOut } from 'lucide-react'
+import { Plus, Trash2, MessageSquare, Loader2, Sun, Moon, X, FileText, Network, ChevronDown, ChevronRight, LogOut, Pencil } from 'lucide-react'
 import { useAuthStore } from '@/stores/authStore'
 
 export type PageKey = 'chat' | 'papers' | 'graph'
@@ -15,11 +15,13 @@ interface Props {
 }
 
 export function SessionSidebar({ activePage, onNavigate }: Props) {
-  const { sessions, currentId, loading, loadSessions, createSession, switchSession, deleteSession } = useSessionStore()
+  const { sessions, currentId, loading, loadSessions, createSession, switchSession, deleteSession, renameSession } = useSessionStore()
   const { resolved, setTheme } = useThemeStore()
   const { user, logout } = useAuthStore()
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [sessionsExpanded, setSessionsExpanded] = useState(true)
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
 
   useEffect(() => {
     loadSessions()
@@ -40,6 +42,30 @@ export function SessionSidebar({ activePage, onNavigate }: Props) {
     if (deleteTarget) {
       await deleteSession(deleteTarget)
       setDeleteTarget(null)
+    }
+  }
+
+  const handleStartRename = (e: React.MouseEvent, id: string, currentTitle: string) => {
+    e.stopPropagation()
+    setRenamingId(id)
+    setRenameValue(currentTitle)
+  }
+
+  const handleConfirmRename = async () => {
+    if (renamingId && renameValue.trim()) {
+      await renameSession(renamingId, renameValue)
+    }
+    setRenamingId(null)
+    setRenameValue('')
+  }
+
+  const handleRenameKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      handleConfirmRename()
+    } else if (e.key === 'Escape') {
+      setRenamingId(null)
+      setRenameValue('')
     }
   }
 
@@ -129,7 +155,7 @@ export function SessionSidebar({ activePage, onNavigate }: Props) {
             {nonEmptySessions.map((s) => (
               <div
                 key={s.session_id}
-                onClick={() => { switchSession(s.session_id); onNavigate('chat') }}
+                onClick={() => { if (renamingId !== s.session_id) { switchSession(s.session_id); onNavigate('chat') } }}
                 className={cn(
                   'group flex items-center gap-2 px-3 py-1.5 rounded-lg cursor-pointer transition-colors text-sm',
                   currentId === s.session_id && activePage === 'chat'
@@ -138,7 +164,28 @@ export function SessionSidebar({ activePage, onNavigate }: Props) {
                 )}
                 style={!(currentId === s.session_id && activePage === 'chat') ? { color: 'var(--text-primary)' } : undefined}
               >
-                <span className="truncate flex-1 text-xs">{s.title || s.session_id}</span>
+                {renamingId === s.session_id ? (
+                  <input
+                    autoFocus
+                    value={renameValue}
+                    onChange={(e) => setRenameValue(e.target.value)}
+                    onBlur={handleConfirmRename}
+                    onKeyDown={handleRenameKeyDown}
+                    onClick={(e) => e.stopPropagation()}
+                    className="flex-1 min-w-0 text-xs bg-transparent outline-none border rounded px-1.5 py-0.5"
+                    style={{ borderColor: 'var(--accent)', color: 'var(--text-primary)' }}
+                    maxLength={60}
+                  />
+                ) : (
+                  <span className="truncate flex-1 text-xs">{s.title || s.session_id}</span>
+                )}
+                <button
+                  onClick={(e) => handleStartRename(e, s.session_id, s.title)}
+                  className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-opacity"
+                  title="重命名"
+                >
+                  <Pencil size={11} style={{ color: 'var(--text-secondary)' }} />
+                </button>
                 <button
                   onClick={(e) => handleDeleteClick(e, s.session_id)}
                   className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-900/30 transition-opacity"

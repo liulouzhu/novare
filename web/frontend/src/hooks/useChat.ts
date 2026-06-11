@@ -217,10 +217,26 @@ export function useChat(sessionId: string) {
     }
   }, [sessionId, isStreaming, addUserMessage, startAssistantMessage, setStreaming, sendMessage])
 
+  const stop = useCallback(() => {
+    if (!isStreaming) return
+
+    // 通知后端停止
+    sendMessage({ type: 'stop' })
+
+    // 在当前 assistant 消息上追加停止提示
+    if (assistantMsgId.current) {
+      appendText(assistantMsgId.current, '\n\n⏹ 已停止')
+      finishMessage(assistantMsgId.current)
+      assistantMsgId.current = null
+    }
+    setStreaming(false)
+  }, [isStreaming, sendMessage, appendText, finishMessage, setStreaming])
+
   return {
     messages: getMessages(sessionId),
     isStreaming,
     connected,
     send,
+    stop,
   }
 }

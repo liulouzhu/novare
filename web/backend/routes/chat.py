@@ -28,6 +28,7 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
       客户端 → 服务端:
         {"type": "send", "content": "用户消息"}
         {"type": "send_with_refs", "content": "...", "references": [...]}
+        {"type": "stop"}
 
       服务端 → 客户端:
         {"type": "text_delta", "content": "..."}
@@ -64,21 +65,49 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
 
     session = agent_service.load_session(session_id, user_id=user_id_str)
     queue: asyncio.Queue = asyncio.Queue()
+    current_task: asyncio.Task | None = None
+    stopped = False
+
+    async def recv_messages():
+        """监听 WebSocket 收到的消息，转发到 queue 供主循环处理"""
+        nonlocal stopped, current_task
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    await websocket.send_json({"type": "error", "message": "Invalid JSON"})
+                    continue
+
+                msg_type = data.get("type", "send")
+
+                if msg_type == "stop":
+                    stopped = True
+                    if current_task and not current_task.done():
+                        current_task.cancel()
+                        logger.info("Agent task cancelled by user: session=%s", session_id)
+                    continue
+
+                # 将消息放入 queue 由主循环处理
+                await queue.put(data)
+        except WebSocketDisconnect:
+            pass
 
     try:
+        recv_task = asyncio.create_task(recv_messages())
+
         while True:
-            raw = await websocket.receive_text()
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                await websocket.send_json({"type": "error", "message": "Invalid JSON"})
-                continue
+            # 等待用户消息（从 recv_messages 放入的 queue）
+            data = await queue.get()
 
             msg_type = data.get("type", "send")
             content = data.get("content", "")
 
             if not content.strip():
                 continue
+
+            stopped = False
 
             # 构建用户输入（含引用上下文）
             user_input = content
@@ -88,21 +117,35 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
                     refs_text += f"- {ref.get('title', ref.get('id', ''))}\n"
                 user_input = content + refs_text
 
-            # 在后台任务中执行 agent.run_turn
-            task = asyncio.create_task(
-                agent_service.run_turn(session, user_input, queue, user_id=user_id_str)
+            # 创建 agent 任务
+            event_queue: asyncio.Queue = asyncio.Queue()
+            current_task = asyncio.create_task(
+                agent_service.run_turn(session, user_input, event_queue, user_id=user_id_str)
             )
 
-            # 从 queue 读取事件并推送给客户端
+            # 从 event_queue 读取事件并推送给客户端
             try:
                 while True:
-                    event = await asyncio.wait_for(queue.get(), timeout=300)
+                    event = await asyncio.wait_for(event_queue.get(), timeout=300)
+                    if stopped:
+                        # 用户已停止，丢弃剩余事件
+                        break
                     await websocket.send_json(event)
                     if event.get("type") in ("done", "error"):
                         break
             except asyncio.TimeoutError:
-                await websocket.send_json({"type": "error", "message": "响应超时"})
-                task.cancel()
+                if not stopped:
+                    await websocket.send_json({"type": "error", "message": "响应超时"})
+                current_task.cancel()
+            except asyncio.CancelledError:
+                logger.info("Agent task cancelled: session=%s", session_id)
+
+            # 如果被停止，发送 done 事件让前端完成清理
+            if stopped:
+                await websocket.send_json({"type": "done"})
+                stopped = False
+
+            current_task = None
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected: session=%s", session_id)
@@ -112,3 +155,9 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
             await websocket.send_json({"type": "error", "message": str(e)})
         except Exception:
             pass
+    finally:
+        # 确保取消运行中的任务
+        if current_task and not current_task.done():
+            current_task.cancel()
+        if not recv_task.done():
+            recv_task.cancel()

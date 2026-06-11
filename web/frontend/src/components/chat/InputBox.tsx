@@ -1,7 +1,7 @@
 /** 多行输入框 */
 
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { Send, Paperclip, Loader2, Search, FileText, HelpCircle } from 'lucide-react'
+import { Send, Paperclip, Loader2, Search, FileText, HelpCircle, Square } from 'lucide-react'
 import { uploadFile } from '@/lib/api'
 
 const SKILLS = [
@@ -12,10 +12,11 @@ const SKILLS = [
 
 interface Props {
   onSend: (content: string, refs?: Array<{ type: string; id: string; title?: string }>) => void
+  onStop: () => void
   disabled: boolean
 }
 
-export function InputBox({ onSend, disabled }: Props) {
+export function InputBox({ onSend, onStop, disabled }: Props) {
   const [text, setText] = useState('')
   const [attachments, setAttachments] = useState<Array<{ name: string; path: string }>>([])
   const [uploading, setUploading] = useState(false)
@@ -96,10 +97,14 @@ export function InputBox({ onSend, disabled }: Props) {
       }
     }
 
-    // Enter 发送，Shift+Enter 换行
+    // Enter 发送（或停止），Shift+Enter 换行
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
       e.preventDefault()
-      handleSend()
+      if (disabled) {
+        onStop()
+      } else {
+        handleSend()
+      }
     }
   }
 
@@ -259,23 +264,37 @@ export function InputBox({ onSend, disabled }: Props) {
             style={{ color: 'var(--text-primary)' }}
           />
 
-          {/* 发送按钮 */}
-          <button
-            onClick={handleSend}
-            disabled={!text.trim() || disabled}
-            className="p-1.5 rounded-md transition-colors shrink-0 disabled:opacity-30"
-            style={{
-              backgroundColor: text.trim() && !disabled ? 'var(--accent)' : 'transparent',
-              color: text.trim() && !disabled ? 'white' : 'var(--text-tertiary)',
-            }}
-            title="发送 (Enter)"
-          >
-            <Send size={16} />
-          </button>
+          {/* 发送/停止按钮 */}
+          {disabled ? (
+            <button
+              onClick={onStop}
+              className="p-1.5 rounded-md transition-colors shrink-0 animate-pulse"
+              style={{
+                backgroundColor: 'var(--error)',
+                color: 'white',
+              }}
+              title="停止生成"
+            >
+              <Square size={16} fill="currentColor" />
+            </button>
+          ) : (
+            <button
+              onClick={handleSend}
+              disabled={!text.trim()}
+              className="p-1.5 rounded-md transition-colors shrink-0 disabled:opacity-30"
+              style={{
+                backgroundColor: text.trim() ? 'var(--accent)' : 'transparent',
+                color: text.trim() ? 'white' : 'var(--text-tertiary)',
+              }}
+              title="发送 (Enter)"
+            >
+              <Send size={16} />
+            </button>
+          )}
         </div>
 
         <div className="text-xs mt-1.5 text-center" style={{ color: 'var(--text-tertiary)' }}>
-          Enter 发送 · Shift+Enter 换行 · 支持拖拽上传文件 · 输入 / 使用 Skill
+          {disabled ? 'Enter 或点击按钮停止生成' : 'Enter 发送 · Shift+Enter 换行 · 支持拖拽上传文件 · 输入 / 使用 Skill'}
         </div>
       </div>
     </div>
