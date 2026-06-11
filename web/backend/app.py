@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -18,11 +19,27 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from web.backend.agent_service import AgentService  # noqa: E402
 from web.backend.db.base import Base, engine  # noqa: E402
+from web.backend.sandbox.manager import (  # noqa: E402
+    IDLE_TIMEOUT,
+    sandbox_manager,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+web_logger = logging.getLogger("novare.web")
 
 # 全局 AgentService 单例
 agent_service = AgentService()
+
+
+async def _idle_cleanup_loop():
+    """Periodically evict sandbox containers that exceed IDLE_TIMEOUT."""
+    interval = max(60, IDLE_TIMEOUT // 4)
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            sandbox_manager.cleanup_idle()
+        except Exception:
+            web_logger.warning("Sandbox idle cleanup error", exc_info=True)
 
 
 @asynccontextmanager
@@ -34,16 +51,32 @@ async def lifespan(app: FastAPI):
     # 确保数据库表存在
     import web.backend.db.models  # noqa: F401 — register all models with Base
     Base.metadata.create_all(bind=engine)
-    logging.getLogger("novare.web").info("DB tables ensured")
+    web_logger.info("DB tables ensured")
+
+    # Clean up stale sandbox containers from previous runs, then start idle watcher
+    sandbox_manager.startup()
+    cleanup_task = asyncio.create_task(_idle_cleanup_loop())
+    web_logger.info("Sandbox idle cleanup task started (interval=%ds)", max(60, IDLE_TIMEOUT // 4))
 
     await agent_service.initialize()
     try:
         yield
     finally:
+        # Shut down sandbox lifecycle: cancel cleanup, destroy all containers
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            sandbox_manager.shutdown()
+        except Exception:
+            web_logger.warning("Sandbox shutdown error (non-fatal)", exc_info=True)
+
         try:
             await agent_service.shutdown()
         except Exception:
-            logging.getLogger("novare.web").warning("Shutdown error (non-fatal)", exc_info=True)
+            web_logger.warning("Shutdown error (non-fatal)", exc_info=True)
 
 
 app = FastAPI(

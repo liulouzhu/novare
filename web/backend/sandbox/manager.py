@@ -12,6 +12,13 @@ logger = logging.getLogger(__name__)
 IMAGE = "research-sandbox:latest"
 IDLE_TIMEOUT = 1800  # 30 minutes
 
+# Labels applied to every sandbox container for identification & cleanup
+SANDBOX_LABELS = {
+    "app": "research-agent",
+    "component": "sandbox",
+    "managed-by": "web-backend",
+}
+
 
 class DockerSandboxManager:
     """Manages per-user Docker sandboxes for code execution."""
@@ -24,6 +31,24 @@ class DockerSandboxManager:
             self.client = None
         self._containers: dict[str, docker.models.containers.Container] = {}
         self._last_used: dict[str, float] = {}
+
+    def startup(self):
+        """Clean up stale sandbox containers left over from previous runs."""
+        if not self.client:
+            return
+        try:
+            stale = self.client.containers.list(
+                all=True,
+                filters={"label": [f"{k}={v}" for k, v in SANDBOX_LABELS.items()]},
+            )
+            for container in stale:
+                try:
+                    container.remove(force=True)
+                    logger.info("Removed stale sandbox container: %s", container.name)
+                except Exception as e:
+                    logger.warning("Failed to remove stale sandbox %s: %s", container.name, e)
+        except Exception as e:
+            logger.warning("Failed during stale sandbox cleanup: %s", e)
 
     def _container_name(self, user_id: str) -> str:
         return f"sandbox-{user_id[:12]}"
@@ -122,6 +147,7 @@ class DockerSandboxManager:
             detach=True,
             stdin_open=True,
             name=name,
+            labels=SANDBOX_LABELS,
             mem_limit="512m",
             memswap_limit="512m",
             nano_cpus=1_000_000_000,  # 1 CPU
@@ -186,6 +212,8 @@ class DockerSandboxManager:
                 timeout=effective_timeout + 5,
             )
         except asyncio.TimeoutError:
+            # Destroy the container to avoid reusing a potentially stuck container
+            self.destroy(user_id)
             return {
                 "exit_code": -1,
                 "stdout": "",

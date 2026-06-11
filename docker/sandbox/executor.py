@@ -17,8 +17,9 @@ _original_exec = builtins.exec  # keep executor internals working after builtins
 
 
 def restricted_open(path, *args, **kwargs):
-    if not any(path.startswith(p) for p in ALLOWED_PATHS):
-        raise PermissionError(f"open() denied: {path} not in allowed paths")
+    path_str = os.fspath(path)
+    if not any(path_str.startswith(p) for p in ALLOWED_PATHS):
+        raise PermissionError(f"open() denied: {path_str} not in allowed paths")
     return _original_open(path, *args, **kwargs)
 
 
