@@ -1,7 +1,7 @@
 /** 聊天消息状态管理 */
 
 import { create } from 'zustand'
-import { type Message, type ToolCallState, type TaskState } from '@/lib/ws'
+import { type Message, type ToolCallState, type TaskState, type MessagePart } from '@/lib/ws'
 import { generateId } from '@/lib/utils'
 
 interface ChatStore {
@@ -9,6 +9,7 @@ interface ChatStore {
   messagesBySession: Record<string, Message[]>
   isStreaming: boolean
   streamingMessageId: string | null
+  streamingTaskState: TaskState | null
 
   getMessages: (sessionId: string) => Message[]
   addUserMessage: (sessionId: string, content: string) => string
@@ -27,6 +28,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   messagesBySession: {},
   isStreaming: false,
   streamingMessageId: null,
+  streamingTaskState: null,
 
   getMessages: (sessionId: string) => {
     return get().messagesBySession[sessionId] || []
@@ -46,7 +48,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   startAssistantMessage: (sessionId: string) => {
     const id = generateId()
-    const msg: Message = { id, role: 'assistant', content: '', toolCalls: [], isStreaming: true, timestamp: Date.now() }
+    const msg: Message = { id, role: 'assistant', content: '', orderedParts: [], toolCalls: [], isStreaming: true, timestamp: Date.now() }
     set((s) => ({
       messagesBySession: {
         ...s.messagesBySession,
@@ -65,7 +67,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const idx = msgs.findIndex((m) => m.id === messageId)
         if (idx !== -1) {
           newBySession[sid] = [...msgs]
-          newBySession[sid][idx] = { ...msgs[idx], content: msgs[idx].content + content }
+          const parts = [...(msgs[idx].orderedParts || [])]
+          const last = parts[parts.length - 1]
+          if (last && last.type === 'text') {
+            parts[parts.length - 1] = { type: 'text', content: last.content + content }
+          } else {
+            parts.push({ type: 'text', content })
+          }
+          newBySession[sid][idx] = {
+            ...msgs[idx],
+            content: msgs[idx].content + content,
+            orderedParts: parts,
+          }
           break
         }
       }
@@ -81,9 +94,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const idx = msgs.findIndex((m) => m.id === messageId)
         if (idx !== -1) {
           newBySession[sid] = [...msgs]
+          const parts = [...(msgs[idx].orderedParts || []), { type: 'tool' as const, toolCallId: tool.id }]
           newBySession[sid][idx] = {
             ...msgs[idx],
             toolCalls: [...(msgs[idx].toolCalls || []), tool],
+            orderedParts: parts,
           }
           break
         }
@@ -123,11 +138,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           break
         }
       }
-      return { messagesBySession: newBySession, streamingMessageId: null }
+      return { messagesBySession: newBySession, streamingMessageId: null, streamingTaskState: null }
     })
   },
 
-  setStreaming: (streaming: boolean) => set({ isStreaming: streaming }),
+  setStreaming: (streaming: boolean) => set({
+    isStreaming: streaming,
+    ...(streaming ? {} : { streamingTaskState: null }),
+  }),
 
   setMessages: (sessionId: string, messages: Message[]) => {
     set((s) => ({
@@ -147,7 +165,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           break
         }
       }
-      return { messagesBySession: newBySession }
+      return { messagesBySession: newBySession, streamingTaskState: state }
     })
   },
 

@@ -2,8 +2,10 @@
 
 import { useEffect, useRef } from 'react'
 import { useChat } from '@/hooks/useChat'
+import { useChatStore } from '@/stores/chatStore'
 import { MessageBubble } from './MessageBubble'
 import { InputBox } from './InputBox'
+import { TaskStatePanel } from './TaskStatePanel'
 import { Wifi, WifiOff, Loader2, PanelRightClose, PanelRightOpen } from 'lucide-react'
 
 interface Props {
@@ -14,6 +16,7 @@ interface Props {
 
 export function ChatArea({ sessionId, panelOpen, onTogglePanel }: Props) {
   const { messages, isStreaming, connected, send, stop } = useChat(sessionId)
+  const streamingTaskState = useChatStore((s) => s.streamingTaskState)
   const scrollRef = useRef<HTMLDivElement>(null)
   const autoScrollRef = useRef(true)
 
@@ -22,7 +25,7 @@ export function ChatArea({ sessionId, panelOpen, onTogglePanel }: Props) {
     if (autoScrollRef.current && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
-  }, [messages])
+  }, [messages, streamingTaskState])
 
   // 检测用户是否手动滚动
   const handleScroll = () => {
@@ -80,6 +83,13 @@ export function ChatArea({ sessionId, panelOpen, onTogglePanel }: Props) {
           )}
         </div>
       </div>
+
+      {/* 任务状态面板（可收缩，仅 streaming 时显示） */}
+      {isStreaming && streamingTaskState && (
+        <div className="shrink-0 max-w-3xl mx-auto w-full px-4 pb-1">
+          <TaskStatePanel taskState={streamingTaskState} />
+        </div>
+      )}
 
       {/* 输入框 */}
       <InputBox onSend={send} onStop={stop} disabled={isStreaming} />

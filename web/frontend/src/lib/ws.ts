@@ -43,11 +43,17 @@ export interface ToolCallState {
   error?: string
 }
 
+// 消息内容片段（按时间顺序交织文本和工具调用）
+export type MessagePart =
+  | { type: 'text'; content: string }
+  | { type: 'tool'; toolCallId: string }
+
 // 消息
 export interface Message {
   id: string
   role: 'user' | 'assistant' | 'system'
   content: string
+  orderedParts?: MessagePart[]
   toolCalls?: ToolCallState[]
   taskState?: TaskState
   isStreaming?: boolean

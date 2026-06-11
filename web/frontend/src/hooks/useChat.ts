@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef } from 'react'
 import { useWebSocket } from './useWebSocket'
 import { useChatStore } from '@/stores/chatStore'
 import { useSessionStore } from '@/stores/sessionStore'
-import { type ServerEvent, type ToolCallState, type TaskState, type Message } from '@/lib/ws'
+import { type ServerEvent, type ToolCallState, type TaskState, type Message, type MessagePart } from '@/lib/ws'
 import { generateId } from '@/lib/utils'
 import { fetchSession } from '@/lib/api'
 
@@ -66,6 +66,12 @@ function convertBackendMessages(raw: Array<{ role: string; content: string; tool
         role: 'assistant',
         content: msg.content || '',
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+        orderedParts: toolCalls.length > 0
+          ? [
+              ...toolCalls.map((tc): MessagePart => ({ type: 'tool' as const, toolCallId: tc.id })),
+              ...(msg.content ? [{ type: 'text' as const, content: msg.content }] : []),
+            ]
+          : undefined,
         timestamp: Date.now(),
       })
     }
