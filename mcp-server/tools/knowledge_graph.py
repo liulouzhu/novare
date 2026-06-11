@@ -6,6 +6,7 @@ import os
 import re
 from typing import Optional
 
+import httpx
 import networkx as nx
 
 from core.database import get_connection, get_paper
@@ -69,6 +70,21 @@ DATASETS = [
     ("YouTube-BoundingBoxes", ["youtube-bounding"]),
 ]
 
+METRICS = [
+    ("AUC-ROC", ["auc-roc", "auroc", "area under roc"]),
+    ("Average Precision", ["mean average precision", "average precision"]),
+    ("F1 Score", ["f1-score", "f1 score"]),
+    ("PSNR", ["psnr", "peak signal-to-noise"]),
+    ("SSIM", ["ssim", "structural similarity"]),
+    ("FID", ["fid", "fréchet inception", "frechet inception"]),
+    ("IoU", ["iou", "intersection over union"]),
+    ("RMSE", ["rmse", "root mean square error"]),
+    ("MAE", ["mean absolute error"]),
+    ("BLEU", ["bleu score", "bleu metric"]),
+    ("ROUGE", ["rouge score", "rouge metric", "rouge-l"]),
+    ("CIDEr", ["cider score", "cider metric"]),
+]
+
 TASKS = [
     ("Video Anomaly Detection", ["video anomaly detection", "video anomalous", "vad"]),
     ("Anomaly Detection", ["anomaly detection", "anomaly detection", "outlier detection", "abnormal event detection"]),
@@ -93,12 +109,12 @@ TASKS = [
 
 
 def _extract_entities_from_text(text: str) -> list[dict]:
-    """从文本中提取实体（方法/数据集/任务），返回 [{name, type}]"""
+    """从文本中提取实体（方法/数据集/任务/指标），返回 [{name, type}]"""
     text_lower = text.lower()
     found = []
     seen = set()
 
-    for category, dictionary in [("Method", METHODS), ("Dataset", DATASETS), ("Task", TASKS)]:
+    for category, dictionary in [("Method", METHODS), ("Dataset", DATASETS), ("Task", TASKS), ("Metric", METRICS)]:
         for canonical, aliases in dictionary:
             if canonical.lower() in seen:
                 continue
@@ -111,6 +127,130 @@ def _extract_entities_from_text(text: str) -> list[dict]:
                     break
 
     return found
+
+
+# ── LLM 实体抽取 ──────────────────────────────────────────────────────────
+
+_EXTRACTION_PROMPT = """你是一个学术论文实体抽取助手。请从以下论文摘要中抽取研究实体，输出 JSON 数组。
+
+抽取类型和说明：
+- Method: 模型架构、算法、技术方法（如 Transformer, CNN, Contrastive Learning 等）
+- Task: 研究任务或问题（如 Object Detection, Anomaly Detection 等）
+- Dataset: 数据集名称（如 UCF-Crime, ImageNet, COCO 等）
+- Metric: 评估指标（如 AUC-ROC, PSNR, mAP, F1 Score 等）
+- Contribution: 论文的主要贡献或创新点，用简洁短语描述（如 "提出时序建模框架", "首次将对比学习用于异常检测"）
+- Limitation: 论文明确提到的局限性，用简洁短语描述（如 "依赖光流输入", "无法处理实时场景"）
+
+规则：
+1. 每个实体用 canonical name（英文），不要用缩写作主名
+2. Contribution 和 Limitation 必须是论文摘要中明确提及的，不要推测
+3. 每种类型最多提取 5 个
+4. 只输出 JSON 数组，不要输出其他内容
+
+输出格式：
+[{"name": "实体名称", "type": "Method"}, ...]
+
+论文摘要：
+{text}"""
+
+# 全局 httpx 客户端（惰性初始化）
+_llm_http: httpx.Client | None = None
+
+
+def _get_llm_client() -> httpx.Client | None:
+    """惰性初始化 LLM httpx 同步客户端"""
+    global _llm_http
+    if _llm_http is not None:
+        return _llm_http
+
+    enabled = os.environ.get("NOVARE_KG_LLM_EXTRACT", "").lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        logger.debug("NOVARE_KG_LLM_EXTRACT 未启用，跳过 LLM 实体抽取")
+        return None
+
+    api_key = os.environ.get("NOVARE_API_KEY", "")
+    base_url = os.environ.get("NOVARE_BASE_URL", "https://api.minimax.chat/v1")
+    if not api_key:
+        logger.warning("NOVARE_API_KEY 未配置，LLM 实体抽取不可用")
+        return None
+
+    _llm_http = httpx.Client(
+        base_url=base_url.rstrip("/"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0),
+    )
+    return _llm_http
+
+
+def _llm_extract_entities(text: str) -> list[dict]:
+    """使用 LLM 从论文摘要中抽取研究实体，返回 [{name, type}]。
+
+    抽取失败时返回空列表，调用方应 fallback 到字典匹配。
+    """
+    client = _get_llm_client()
+    if client is None:
+        return []
+
+    model = os.environ.get("NOVARE_MODEL", "MiniMax-Text-01")
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "user", "content": _EXTRACTION_PROMPT.format(text=text)},
+        ],
+        "max_tokens": 2048,
+        "temperature": 0.1,
+        "stream": False,
+    }
+
+    try:
+        resp = client.post("/chat/completions", json=body)
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"].strip()
+
+        # 尝试从响应中提取 JSON 数组（可能被 ```json ``` 包裹）
+        if "```" in content:
+            match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", content, re.DOTALL)
+            if match:
+                content = match.group(1)
+        elif not content.startswith("["):
+            # 尝试找到第一个 [ 到最后一个 ]
+            start = content.find("[")
+            end = content.rfind("]")
+            if start != -1 and end != -1:
+                content = content[start:end + 1]
+
+        entities = json.loads(content)
+        if not isinstance(entities, list):
+            logger.warning("LLM 返回非数组: %s", content[:200])
+            return []
+
+        # 校验实体结构
+        valid_types = {"Method", "Task", "Dataset", "Metric", "Contribution", "Limitation"}
+        result = []
+        for e in entities:
+            if not isinstance(e, dict) or "name" not in e or "type" not in e:
+                continue
+            if e["type"] not in valid_types:
+                logger.debug("跳过未知实体类型: %s", e["type"])
+                continue
+            result.append({"name": str(e["name"]).strip(), "type": e["type"]})
+
+        logger.info("LLM 实体抽取成功: %d 个实体", len(result))
+        return result
+
+    except httpx.HTTPError as e:
+        logger.warning("LLM 实体抽取 HTTP 错误: %s", e)
+        return []
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        logger.warning("LLM 实体抽取解析错误: %s", e)
+        return []
+    except Exception as e:
+        logger.warning("LLM 实体抽取未知错误: %s", e)
+        return []
 
 
 def _load_graph() -> nx.DiGraph:
@@ -423,8 +563,8 @@ def _action_extract_from_abstract(G: nx.DiGraph, args: dict) -> str:
     """从论文摘要中自动提取实体并构建知识图谱
 
     支持两种模式：
-    1. 自动模式：提供 paper_id，从数据库读取摘要，用词典匹配提取
-    2. 手动模式：提供 paper_id + entities 列表，由 LLM 提供的实体
+    1. 自动模式：提供 paper_id，优先用 LLM 从摘要抽取，失败则回退词典匹配
+    2. 手动模式：提供 paper_id + entities 列表，由调用方提供实体
     """
     paper_id = args.get("paper_id")
     if not paper_id:
@@ -479,8 +619,14 @@ def _action_extract_from_abstract(G: nx.DiGraph, args: dict) -> str:
         if not abstract:
             _save_graph(G)
             return fail("knowledge_graph", f"论文 {paper_id} 没有摘要，无法自动提取实体。请手动提供 entities 参数。")
-        entities = _extract_entities_from_text(abstract)
-        source = "摘要自动提取"
+
+        # 优先使用 LLM 抽取，失败则回退词典匹配
+        entities = _llm_extract_entities(abstract)
+        if entities:
+            source = "LLM 抽取"
+        else:
+            entities = _extract_entities_from_text(abstract)
+            source = "词典匹配（LLM 未启用或不可用）"
 
     if not entities:
         _save_graph(G)
@@ -494,6 +640,9 @@ def _action_extract_from_abstract(G: nx.DiGraph, args: dict) -> str:
         "Method": "uses_method",
         "Dataset": "evaluated_on",
         "Task": "addresses_task",
+        "Metric": "evaluated_with",
+        "Contribution": "contributes",
+        "Limitation": "limited_by",
     }
 
     added = []
@@ -532,10 +681,11 @@ def _action_extract_from_abstract(G: nx.DiGraph, args: dict) -> str:
     return ok("knowledge_graph", {
         "action": "extract_from_abstract",
         "paper_id": paper_id,
+        "source": source,
         "entities_added": len(entities),
         "relations_added": len(added),
         "graph_stats": {"nodes": node_count, "edges": edge_count},
-    }, summary=f"实体提取完成: {paper.get('title', paper_id)}")
+    }, summary=f"实体提取完成({source}): {paper.get('title', paper_id)}")
 
 
 def _find_node(G: nx.DiGraph, name: str) -> Optional[str]:

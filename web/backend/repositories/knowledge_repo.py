@@ -72,21 +72,55 @@ class KnowledgeRepository(BaseRepository):
                     queue.append((next_id, path + [next_id]))
         return []
 
-    def get_graph_data(self) -> dict:
+    def get_graph_data(self, exclude_types: list[str] | None = None) -> dict:
         nodes = self.get_nodes()
         edges = self.get_edges()
-        return {
-            "nodes": [{"id": str(n.id), "label": n.label, "type": n.type, **(n.properties or {})} for n in nodes],
-            "links": [{"source": str(e.source_node_id), "target": str(e.target_node_id), "relation": e.relation_type} for e in edges],
-        }
 
-    def get_stats(self) -> dict:
+        # 按类型过滤节点
+        excluded = set(exclude_types) if exclude_types else set()
+        excluded_ids = set()
+
+        filtered_nodes = []
+        for n in nodes:
+            if n.type in excluded:
+                excluded_ids.add(str(n.id))
+                continue
+            filtered_nodes.append(
+                {"id": str(n.id), "label": n.label, "type": n.type, **(n.properties or {})}
+            )
+
+        # 过滤引用被排除节点的边
+        filtered_links = []
+        for e in edges:
+            src, tgt = str(e.source_node_id), str(e.target_node_id)
+            if src in excluded_ids or tgt in excluded_ids:
+                continue
+            filtered_links.append(
+                {"source": src, "target": tgt, "relation": e.relation_type}
+            )
+
+        return {"nodes": filtered_nodes, "links": filtered_links}
+
+    def get_stats(self, exclude_types: list[str] | None = None) -> dict:
         nodes = self.get_nodes()
         edges = self.get_edges()
+        excluded = set(exclude_types) if exclude_types else set()
+        excluded_ids = {str(n.id) for n in nodes if n.type in excluded}
+        filtered_nodes = [n for n in nodes if str(n.id) not in excluded_ids]
+        filtered_edges = [
+            e for e in edges
+            if str(e.source_node_id) not in excluded_ids and str(e.target_node_id) not in excluded_ids
+        ]
+
         node_types = {}
-        for n in nodes:
+        for n in filtered_nodes:
             node_types[n.type] = node_types.get(n.type, 0) + 1
         edge_types = {}
-        for e in edges:
+        for e in filtered_edges:
             edge_types[e.relation_type] = edge_types.get(e.relation_type, 0) + 1
-        return {"total_nodes": len(nodes), "total_edges": len(edges), "node_types": node_types, "edge_types": edge_types}
+        return {
+            "total_nodes": len(filtered_nodes),
+            "total_edges": len(filtered_edges),
+            "node_types": node_types,
+            "edge_types": edge_types,
+        }

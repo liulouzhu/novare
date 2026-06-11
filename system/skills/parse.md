@@ -15,4 +15,5 @@ description: 解析论文 PDF 并提取关键信息
    - 主要贡献（Contributions）
 4. 用 knowledge_graph(action="query") 查看自动提取的实体和关系
 5. 如果摘要自动提取遗漏了重要实体，用 knowledge_graph(action="extract_from_abstract") 手动补充
-6. 用中文输出结构化摘要
+6. 识别论文的 **主要贡献（Contribution）** 和 **局限性（Limitation）**，用 knowledge_graph(action="extract_from_abstract", paper_id="...", entities=[{"name":"贡献描述","type":"Contribution"},{"name":"局限描述","type":"Limitation"}]) 写入图谱
+7. 用中文输出结构化摘要

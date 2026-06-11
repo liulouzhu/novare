@@ -18,12 +18,19 @@ router = APIRouter(prefix="/api/graph", tags=["graph"])
 
 @router.get("")
 async def get_graph(
+    exclude: str = "Author",
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """获取完整知识图谱数据（nodes + edges）"""
+    """获取完整知识图谱数据（nodes + edges）
+
+    Query params:
+        exclude: 逗号分隔的节点类型列表，默认 "Author"。
+                 传空字符串 exclude= 可返回所有节点。
+    """
     repo = KnowledgeRepository(db, user.id)
-    data = repo.get_graph_data()
+    exclude_types = [t.strip() for t in exclude.split(",") if t.strip()] if exclude else []
+    data = repo.get_graph_data(exclude_types=exclude_types)
 
     # 前端期望的节点字段（带默认值）
     nodes = []
@@ -53,9 +60,11 @@ async def get_graph(
 
 @router.get("/stats")
 async def get_graph_stats(
+    exclude: str = "Author",
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """获取图谱统计信息"""
     repo = KnowledgeRepository(db, user.id)
-    return repo.get_stats()
+    exclude_types = [t.strip() for t in exclude.split(",") if t.strip()] if exclude else []
+    return repo.get_stats(exclude_types=exclude_types)

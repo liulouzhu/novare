@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { type GraphData, type GraphNode, fetchGraph, fetchGraphStats, type GraphStats } from '@/lib/api'
-import { RefreshCw, Loader2, ZoomIn, ZoomOut, Maximize2 } from 'lucide-react'
+import { RefreshCw, Loader2, ZoomIn, ZoomOut, Maximize2, Users } from 'lucide-react'
 
 // 动态导入的组件引用
 let ForceGraph2D: any = null
@@ -10,6 +10,12 @@ let ForceGraph2D: any = null
 const NODE_COLORS: Record<string, string> = {
   Paper: '#3b82f6',
   Author: '#10b981',
+  Method: '#8b5cf6',
+  Task: '#ec4899',
+  Dataset: '#f59e0b',
+  Metric: '#06b6d4',
+  Contribution: '#22c55e',
+  Limitation: '#ef4444',
   Concept: '#f59e0b',
   Unknown: '#6b7280',
 }
@@ -17,6 +23,12 @@ const NODE_COLORS: Record<string, string> = {
 const NODE_SIZES: Record<string, number> = {
   Paper: 8,
   Author: 5,
+  Method: 7,
+  Task: 7,
+  Dataset: 7,
+  Metric: 6,
+  Contribution: 6,
+  Limitation: 6,
   Concept: 7,
   Unknown: 4,
 }
@@ -30,6 +42,7 @@ export function KnowledgeGraphPage() {
   const graphRef = useRef<any>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 })
+  const [showAuthors, setShowAuthors] = useState(false)
 
   // 动态导入 react-force-graph-2d
   useEffect(() => {
@@ -61,25 +74,22 @@ export function KnowledgeGraphPage() {
   }, [])
 
   // 加载数据
-  useEffect(() => {
+  const loadGraph = useCallback(() => {
     setLoading(true)
-    Promise.all([fetchGraph(), fetchGraphStats()])
+    const exclude = showAuthors ? '' : 'Author'
+    Promise.all([fetchGraph(exclude), fetchGraphStats(exclude)])
       .then(([graph, s]) => {
         setGraphData(graph)
         setStats(s)
       })
       .catch((e) => console.error('Failed to load graph:', e))
       .finally(() => setLoading(false))
-  }, [])
+  }, [showAuthors])
+
+  useEffect(() => { loadGraph() }, [loadGraph])
 
   const handleRefresh = () => {
-    setLoading(true)
-    Promise.all([fetchGraph(), fetchGraphStats()])
-      .then(([graph, s]) => {
-        setGraphData(graph)
-        setStats(s)
-      })
-      .finally(() => setLoading(false))
+    loadGraph()
   }
 
   const nodeColor = useCallback((node: any) => NODE_COLORS[node.type] || NODE_COLORS.Unknown, [])
@@ -116,6 +126,13 @@ export function KnowledgeGraphPage() {
             )}
           </div>
           <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setShowAuthors((v) => !v)}
+              className={`p-1.5 rounded-md transition-colors ${showAuthors ? 'bg-blue-100 dark:bg-blue-900/30' : 'hover:bg-gray-100 dark:hover:bg-gray-800'}`}
+              title={showAuthors ? '隐藏作者节点' : '显示作者节点'}
+            >
+              <Users size={16} style={{ color: showAuthors ? '#3b82f6' : 'var(--text-secondary)' }} />
+            </button>
             <button onClick={() => graphRef.current?.zoom(1.5, 300)} className="p-1.5 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors" title="放大">
               <ZoomIn size={16} style={{ color: 'var(--text-secondary)' }} />
             </button>

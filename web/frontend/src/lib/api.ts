@@ -189,14 +189,20 @@ export interface GraphStats {
   edge_types: Record<string, number>
 }
 
-export async function fetchGraph(): Promise<GraphData> {
-  const res = await fetch(`${BASE}/api/graph`, { headers: authHeaders() })
+export async function fetchGraph(exclude: string = 'Author'): Promise<GraphData> {
+  const params = new URLSearchParams()
+  params.set('exclude', exclude)
+  const qs = params.toString()
+  const res = await fetch(`${BASE}/api/graph${qs ? '?' + qs : ''}`, { headers: authHeaders() })
   if (!res.ok) { handleAuthError(res); throw new Error('Failed to fetch graph') }
   return res.json()
 }
 
-export async function fetchGraphStats(): Promise<GraphStats> {
-  const res = await fetch(`${BASE}/api/graph/stats`, { headers: authHeaders() })
+export async function fetchGraphStats(exclude: string = 'Author'): Promise<GraphStats> {
+  const params = new URLSearchParams()
+  params.set('exclude', exclude)
+  const qs = params.toString()
+  const res = await fetch(`${BASE}/api/graph/stats${qs ? '?' + qs : ''}`, { headers: authHeaders() })
   if (!res.ok) { handleAuthError(res); throw new Error('Failed to fetch graph stats') }
   return res.json()
 }
