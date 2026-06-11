@@ -198,7 +198,7 @@ def generate_summary(removed_messages: list[dict]) -> str:
     tool_count = sum(1 for m in removed_messages if m.get("role") == "tool")
 
     lines = [
-        "[本会话已压缩 - 原始 {} 条消息 (用户={}, 助手={}, 工具={})]".format(
+        "[历史摘要 - 原始 {} 条消息 (用户={}, 助手={}, 工具={})]".format(
             len(removed_messages), user_count, assistant_count, tool_count
         ),
     ]
@@ -282,7 +282,7 @@ def compact_messages(
         compacted.append(messages[0])  # 原始 system prompt
 
     compacted.append({
-        "role": "system",
+        "role": "assistant",
         "content": summary_text,
         "_compacted": True,
     })
@@ -310,7 +310,7 @@ def merge_compaction_summaries(existing_summary: str, new_timeline: str) -> str:
     # 从已有摘要中提取关键信息（跳过头部标记行）
     for line in existing_summary.split("\n"):
         stripped = line.strip()
-        if stripped.startswith("[本会话已压缩"):
+        if stripped.startswith("[历史摘要"):
             continue
         if stripped:
             lines.append(stripped)
@@ -321,10 +321,10 @@ def merge_compaction_summaries(existing_summary: str, new_timeline: str) -> str:
         lines.append("新增压缩上下文：")
     for line in new_timeline.split("\n"):
         stripped = line.strip()
-        if stripped.startswith("[本会话已压缩"):
+        if stripped.startswith("[历史摘要"):
             continue
         if stripped:
             lines.append("  {}".format(stripped))
 
-    header = "[本会话已压缩 - 包含多次压缩的历史记录]"
+    header = "[历史摘要 - 包含多次压缩的上下文记录]"
     return header + "\n" + "\n".join(lines)

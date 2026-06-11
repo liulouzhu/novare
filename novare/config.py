@@ -97,6 +97,14 @@ class NovareConfig:
         if max_mem:
             cfg.max_memories_per_user = int(max_mem)
 
+        # 上下文管理
+        compact_threshold = os.environ.get("NOVARE_AUTO_COMPACT_THRESHOLD")
+        if compact_threshold:
+            cfg.auto_compact_threshold = int(compact_threshold)
+        preserve_recent = os.environ.get("NOVARE_PRESERVE_RECENT_MESSAGES")
+        if preserve_recent:
+            cfg.preserve_recent_messages = int(preserve_recent)
+
         # 配置文件
         path = Path(config_path).resolve() if config_path else cfg.workspace / ".novare" / "config.json"
         if path.exists():
