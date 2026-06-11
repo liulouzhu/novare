@@ -38,10 +38,18 @@ async def handle_spawn_subagent(args: dict, **kwargs) -> str:
     - system_prompt: str
     - workspace: Path
     """
+    # 从 tool_context 获取依赖（放在参数解析之前，因为 max_iterations 默认值依赖它）
+    registry: SubagentRegistry = kwargs.get("subagent_registry")
+    parent_registry: ToolRegistry = kwargs.get("parent_tool_registry")
+    llm_client: LLMClient = kwargs.get("llm_client")
+    system_prompt: str = kwargs.get("system_prompt", "")
+    user_id: str | None = kwargs.get("user_id")
+    default_max_iterations: int = kwargs.get("default_max_iterations", 16)
+
     # 解析参数
     type_str = args.get("subagent_type", "general")
     task = args.get("task", "")
-    max_iterations = args.get("max_iterations", 16)
+    max_iterations = args.get("max_iterations", default_max_iterations)
     context = args.get("context")
     await_result = args.get("await_result", False)
 
@@ -54,13 +62,6 @@ async def handle_spawn_subagent(args: dict, **kwargs) -> str:
     except ValueError:
         valid = [t.value for t in SubagentType]
         return json.dumps({"error": f"无效的子智能体类型: {type_str}，可选: {valid}"}, ensure_ascii=False)
-
-    # 从 tool_context 获取依赖
-    registry: SubagentRegistry = kwargs.get("subagent_registry")
-    parent_registry: ToolRegistry = kwargs.get("parent_tool_registry")
-    llm_client: LLMClient = kwargs.get("llm_client")
-    system_prompt: str = kwargs.get("system_prompt", "")
-    user_id: str | None = kwargs.get("user_id")
 
     if not all([registry, parent_registry, llm_client]):
         return json.dumps({"error": "子智能体系统未正确初始化"}, ensure_ascii=False)
@@ -150,6 +151,7 @@ def register_subagent_tools(
     llm_client: LLMClient,
     system_prompt: str,
     workspace,
+    default_max_iterations: int = 16,
 ) -> None:
     """在工具注册表中注册子智能体相关的工具
 
@@ -172,6 +174,7 @@ def register_subagent_tools(
         "llm_client": llm_client,
         "system_prompt": system_prompt,
         "workspace": workspace,
+        "default_max_iterations": default_max_iterations,
     }
 
     # ── spawn_subagent ──

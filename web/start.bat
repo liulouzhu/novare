@@ -1,4 +1,5 @@
-@echo off
+﻿@echo off
+chcp 65001 > nul
 REM Novare Web 启动脚本
 REM 同时启动 FastAPI 后端和 Vite 前端开发服务器
 

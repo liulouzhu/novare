@@ -40,6 +40,10 @@ class NovareConfig:
     enable_long_term_memory: bool = True    # 是否启用长期记忆
     max_memories_per_user: int = 50         # 每个用户最大记忆条数
 
+    # 迭代次数限制
+    max_iterations: int = 20                # 主 agent 最大工具调用轮次
+    subagent_max_iterations: int = 16       # 子智能体最大工具调用轮次
+
     @classmethod
     def load(cls, config_path: str | Path | None = None) -> "NovareConfig":
         """从 .env 文件、环境变量和配置文件加载配置"""
@@ -65,6 +69,14 @@ class NovareConfig:
         workspace = os.environ.get("NOVARE_WORKSPACE")
         if workspace:
             cfg.workspace = Path(workspace).resolve()
+
+        # 迭代次数
+        max_iter = os.environ.get("NOVARE_MAX_ITERATIONS")
+        if max_iter:
+            cfg.max_iterations = int(max_iter)
+        sub_max_iter = os.environ.get("NOVARE_SUBAGENT_MAX_ITERATIONS")
+        if sub_max_iter:
+            cfg.subagent_max_iterations = int(sub_max_iter)
 
         # 配置文件
         path = Path(config_path).resolve() if config_path else cfg.workspace / ".novare" / "config.json"

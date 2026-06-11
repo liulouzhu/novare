@@ -142,6 +142,7 @@ async def main():
         llm_client=llm_client,
         tool_registry=tool_registry,
         system_prompt=config.system_prompt,
+        max_iterations=config.max_iterations,
     )
 
     # 初始化子智能体系统
@@ -152,6 +153,7 @@ async def main():
         llm_client=llm_client,
         system_prompt=config.system_prompt,
         workspace=config.workspace,
+        default_max_iterations=config.subagent_max_iterations,
     )
 
     # 发现 Skills：系统公共 + 用户私有

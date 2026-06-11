@@ -104,6 +104,7 @@ class AgentService:
             tool_registry=self.tool_registry,
             system_prompt=self.config.system_prompt,
             reviewer_llm=self.reviewer_llm,
+            max_iterations=self.config.max_iterations,
             auto_compact_threshold=self.config.auto_compact_threshold,
             preserve_recent_messages=self.config.preserve_recent_messages,
         )
@@ -116,6 +117,7 @@ class AgentService:
             llm_client=self.llm_client,
             system_prompt=self.config.system_prompt,
             workspace=self.config.workspace,
+            default_max_iterations=self.config.subagent_max_iterations,
         )
 
         mode = "dual-model" if self.reviewer_llm else "single-model"
