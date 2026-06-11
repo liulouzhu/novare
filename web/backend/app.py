@@ -116,3 +116,19 @@ app.include_router(memories_router)
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "model": agent_service.config.model if agent_service.config else "not ready"}
+
+
+@app.get("/api/skills")
+async def list_skills():
+    """返回所有可用 skill 列表（从文件系统动态发现）"""
+    from novare.skill import discover_skills
+
+    skill_dirs = []
+    if agent_service.config:
+        skill_dirs = list(agent_service.config.skill_dirs)
+
+    skills = discover_skills(skill_dirs)
+    return [
+        {"name": s.name, "description": s.description}
+        for s in skills
+    ]

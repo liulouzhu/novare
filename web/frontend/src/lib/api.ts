@@ -83,6 +83,19 @@ export async function fetchMe(token?: string): Promise<{ id: string; username: s
   return res.json()
 }
 
+// ── Skills ──
+
+export interface SkillMeta {
+  name: string
+  description: string
+}
+
+export async function fetchSkills(): Promise<SkillMeta[]> {
+  const res = await fetch(`${BASE}/api/skills`, { headers: authHeaders() })
+  if (!res.ok) return []
+  return res.json()
+}
+
 // ── Sessions ──
 
 export async function fetchSessions(): Promise<SessionMeta[]> {

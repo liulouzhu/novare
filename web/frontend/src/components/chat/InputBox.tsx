@@ -1,14 +1,19 @@
 /** 多行输入框 */
 
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { Send, Paperclip, Loader2, Search, FileText, HelpCircle, Square } from 'lucide-react'
-import { uploadFile } from '@/lib/api'
+import { Send, Paperclip, Loader2, Search, FileText, HelpCircle, Square, Sparkles, BookOpen, Zap } from 'lucide-react'
+import { uploadFile, fetchSkills, type SkillMeta } from '@/lib/api'
 
-const SKILLS = [
-  { name: 'research', label: '文献综述', desc: '搜索论文 → 解析 → RAG → 生成综述', icon: <Search size={14} /> },
-  { name: 'parse', label: '论文解析', desc: '解析 PDF，提取结构化信息', icon: <FileText size={14} /> },
-  { name: 'ask', label: '语义问答', desc: '在已解析论文中检索答案', icon: <HelpCircle size={14} /> },
-]
+/** 已知 skill 的图标映射，未知 skill 使用 Zap */
+const SKILL_ICONS: Record<string, React.ReactNode> = {
+  research: <Search size={14} />,
+  parse: <FileText size={14} />,
+  ask: <HelpCircle size={14} />,
+  compile: <BookOpen size={14} />,
+  innovation: <Sparkles size={14} />,
+}
+
+const DEFAULT_ICON = <Zap size={14} />
 
 interface Props {
   onSend: (content: string, refs?: Array<{ type: string; id: string; title?: string }>) => void
@@ -23,9 +28,15 @@ export function InputBox({ onSend, onStop, disabled }: Props) {
   const [showSkills, setShowSkills] = useState(false)
   const [skillFilter, setSkillFilter] = useState('')
   const [selectedSkillIdx, setSelectedSkillIdx] = useState(0)
+  const [skills, setSkills] = useState<SkillMeta[]>([])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const skillListRef = useRef<HTMLDivElement>(null)
+
+  // 动态加载 skill 列表
+  useEffect(() => {
+    fetchSkills().then(setSkills).catch(() => {})
+  }, [])
 
   // 检测 "/" 触发 Skill 列表
   useEffect(() => {
@@ -39,8 +50,8 @@ export function InputBox({ onSend, onStop, disabled }: Props) {
   }, [text])
 
   const filteredSkills = skillFilter
-    ? SKILLS.filter((s) => s.name.includes(skillFilter) || s.label.includes(skillFilter))
-    : SKILLS
+    ? skills.filter((s) => s.name.includes(skillFilter) || s.description.includes(skillFilter))
+    : skills
 
   // 确保选中项在有效范围内
   useEffect(() => {
@@ -201,16 +212,16 @@ export function InputBox({ onSend, onStop, disabled }: Props) {
                   backgroundColor: idx === selectedSkillIdx ? 'var(--bg-tertiary)' : 'transparent',
                 }}
               >
-                <span style={{ color: 'var(--accent)' }}>{skill.icon}</span>
+                <span style={{ color: 'var(--accent)' }}>{SKILL_ICONS[skill.name] || DEFAULT_ICON}</span>
                 <div className="min-w-0 flex-1">
                   <div className="font-medium" style={{ color: 'var(--text-primary)' }}>
                     /{skill.name}
                     <span className="ml-2 text-xs font-normal" style={{ color: 'var(--text-secondary)' }}>
-                      {skill.label}
+                      {skill.description}
                     </span>
                   </div>
                   <div className="text-xs truncate" style={{ color: 'var(--text-tertiary)' }}>
-                    {skill.desc}
+                    {skill.description}
                   </div>
                 </div>
               </button>
