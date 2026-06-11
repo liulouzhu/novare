@@ -1,4 +1,0 @@
-{"role": "user", "content": "编译data\\papers\\2308.11681.pdf这篇论文"}
-{"role": "assistant", "content": "", "tool_calls": [{"id": "call_946fdd460ab54761b6521741", "type": "function", "function": {"name": "paper_parse", "arguments": "{\"file_path\": \"data\\\\papers\\\\2308.11681.pdf\"}"}}]}
-{"role": "tool", "tool_call_id": "call_946fdd460ab54761b6521741", "content": "论文 2308.11681 已解析（72 个分块）。如需重新解析，请先删除相关数据。"}
-{"role": "assistant", "content": "", "tool_calls": [{"id": "call_d9da09c5715d4ae49c95d968", "type": "function", "function": {"name": "rag_query", "arguments": "{\"question\": \"What is the title, authors, and what is this paper about? What are its main contributions?\", \"top_k\": 5}"}}]}
