@@ -251,20 +251,23 @@ def compact_messages(
     if messages and messages[0].get("role") == "system":
         system_end = 1
 
-    # 需要压缩的消息 = system 之后、最近 N 条之前的部分
-    non_system_count = len(messages) - system_end
+    # 需要压缩的消息 = system (+ 已有 _compacted) 之后、最近 N 条之前的部分
+    # 旧 _compacted 摘要始终纳入 removed，合并后只保留一条
+    skip_count = system_end
+    if (system_end < len(messages)
+            and messages[system_end].get("_compacted")):
+        skip_count = system_end + 1
+
+    non_system_count = len(messages) - skip_count
 
     # 消息太少，不需要压缩
     if non_system_count <= preserve_recent:
         return messages, False
 
-    # 计算切分点
+    # 计算切分点（skip_count 保证旧 _compacted 消息落在 removed 侧）
     raw_split = len(messages) - preserve_recent
     split_at = _find_safe_split_point(messages, raw_split)
-
-    # 确保至少压缩一些消息
-    if split_at <= system_end:
-        split_at = raw_split
+    split_at = max(split_at, skip_count)
 
     # 分离
     removed = messages[system_end:split_at]
@@ -273,8 +276,27 @@ def compact_messages(
     if not removed:
         return messages, False
 
-    # 生成摘要
-    summary_text = generate_summary(removed)
+    # 提取已有的 _compacted 摘要（可能有多条，取最后一条的内容）
+    existing_summary = None
+    non_compacted_removed = []
+    for msg in removed:
+        if msg.get("_compacted"):
+            existing_summary = msg.get("content", "")
+        else:
+            non_compacted_removed.append(msg)
+
+    # 对非压缩消息生成新摘要
+    if non_compacted_removed:
+        new_summary = generate_summary(non_compacted_removed)
+    else:
+        # 全是压缩消息，无需再次压缩
+        return messages, False
+
+    # 与已有摘要合并（保证 session.messages 里最多一条 _compacted）
+    if existing_summary:
+        summary_text = merge_compaction_summaries(existing_summary, new_summary)
+    else:
+        summary_text = new_summary
 
     # 组装：system prompt（如有）+ 摘要 + 最近消息
     compacted = []
