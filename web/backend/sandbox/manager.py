@@ -65,7 +65,7 @@ class DockerSandboxManager:
             name=name,
             mem_limit="512m",
             memswap_limit="512m",
-            cpus=1.0,
+            nano_cpus=1_000_000_000,  # 1 CPU
             pids_limit=100,
             network_disabled=True,
             read_only=True,

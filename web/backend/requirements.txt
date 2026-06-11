@@ -8,3 +8,4 @@ python-jose[cryptography]>=3.3
 bcrypt
 pydantic[email]
 alembic>=1.13
+docker>=7.0
