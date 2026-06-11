@@ -30,8 +30,24 @@ def connect_milvus() -> None:
     logger.info("Connected to Milvus at %s:%s", MILVUS_HOST, MILVUS_PORT)
 
 
+def _ensure_connected() -> None:
+    """Ensure an active Milvus connection exists, auto-connecting if needed."""
+    try:
+        active = connections.list_connections()
+        # pymilvus returns list of alias strings; default alias is "default"
+        if not active or "default" not in active:
+            connect_milvus()
+    except Exception:
+        try:
+            connect_milvus()
+        except Exception as e:
+            logger.warning("Cannot connect to Milvus at %s:%s: %s", MILVUS_HOST, MILVUS_PORT, e)
+            raise
+
+
 def ensure_collection() -> Collection:
     """Get or create the paper_chunks collection with proper schema and index."""
+    _ensure_connected()
     if utility.has_collection(COLLECTION_NAME):
         return Collection(COLLECTION_NAME)
 

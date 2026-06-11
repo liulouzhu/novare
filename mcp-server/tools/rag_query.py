@@ -66,10 +66,12 @@ def _brute_force_search(
         return []
 
     results = []
+    skipped_dim = 0
     for emb in all_embeddings:
         if allowed_paper_ids is not None and emb["paper_id"] not in allowed_paper_ids:
             continue
         if len(emb["vec"]) != len(query_vec):
+            skipped_dim += 1
             continue
         score = _cosine_similarity(query_vec, emb["vec"])
         results.append({
@@ -80,6 +82,12 @@ def _brute_force_search(
             "paper_id": emb["paper_id"],
             "title": emb["title"],
         })
+
+    if skipped_dim > 0:
+        logger.warning(
+            "Brute-force search: skipped %d embeddings with mismatched dimension "
+            "(query=%d). Papers may need re-parsing.", skipped_dim, len(query_vec)
+        )
 
     results.sort(key=lambda x: x["score"], reverse=True)
     return results[:top_k]
@@ -93,17 +101,19 @@ def _milvus_search(query_vec: list[float], top_k: int, user_id: str) -> list[dic
     if not hits:
         return []
 
-    # Enrich with title/section from SQLite
+    # Enrich with title/section from PostgreSQL
     results = []
     with get_connection() as conn:
+        from web.backend.db.models import Chunk, Paper
         for h in hits:
-            row = conn.execute(
-                "SELECT p.title, c.section FROM chunks c "
-                "JOIN papers p ON c.paper_id = p.id WHERE c.id = ?",
-                (h["chunk_id"],),
-            ).fetchone()
-            title = row["title"] if row else h["paper_id"]
-            section = row["section"] if row else ""
+            row = (
+                conn.query(Paper.title, Chunk.section)
+                .join(Chunk, Chunk.paper_id == Paper.id)
+                .filter(Chunk.id == h["chunk_id"])
+                .first()
+            )
+            title = row[0] if row else h["paper_id"]
+            section = row[1] if row else ""
             results.append({
                 "score": h["score"],
                 "chunk_id": h["chunk_id"],

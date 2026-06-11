@@ -10,6 +10,10 @@ logger = logging.getLogger("research-server.embedding")
 # 全局缓存
 _embedder = None
 _embedder_type = None
+_init_attempted = False
+
+# 百炼 API 临时失败时的重试窗口（秒）
+_BAILIAN_RETRY_INTERVAL = 120
 
 
 def _get_bailian_embedder():
@@ -68,26 +72,53 @@ def _get_numpy_fallback():
 
 def _init_embedder():
     """初始化嵌入模型，优先 百炼 → 本地 → numpy fallback"""
-    global _embedder, _embedder_type
+    global _embedder, _embedder_type, _init_attempted
 
     result = _get_bailian_embedder()
     if result:
         _embedder_type, _embedder = result
+        _init_attempted = True
         return
 
     result = _get_local_embedder()
     if result:
         _embedder_type, _embedder = result
+        _init_attempted = True
         return
 
     _embedder_type, _embedder = _get_numpy_fallback()
+    _init_attempted = True
+
+
+def reset_embedder():
+    """重置 embedder 状态，下次调用时重新初始化（用于百炼 API 恢复后重试）"""
+    global _embedder, _embedder_type, _init_attempted
+    _embedder = None
+    _embedder_type = None
+    _init_attempted = False
+    logger.info("Embedder reset, will re-initialize on next use")
 
 
 def get_embedder():
-    """获取嵌入模型实例"""
-    global _embedder
-    if _embedder is None:
-        _init_embedder()
+    """获取嵌入模型实例，支持百炼 API 恢复后自动重试"""
+    global _embedder, _embedder_type
+
+    if _embedder is not None:
+        # 如果当前是 fallback，且百炼 API key 存在，定期重试百炼
+        if _embedder_type == "numpy_fallback" and os.environ.get("DASHSCOPE_API_KEY"):
+            # 用模块属性记录上次重试时间
+            last_retry = getattr(get_embedder, '_last_retry', 0)
+            import time
+            now = time.time()
+            if now - last_retry > _BAILIAN_RETRY_INTERVAL:
+                get_embedder._last_retry = now
+                result = _get_bailian_embedder()
+                if result:
+                    logger.info("Bailian API recovered, switching back from fallback")
+                    _embedder_type, _embedder = result
+        return _embedder_type, _embedder
+
+    _init_embedder()
     return _embedder_type, _embedder
 
 
@@ -112,7 +143,7 @@ async def _bailian_embed_async(config: dict, texts: list[str]) -> list[list[floa
         "Content-Type": "application/json",
     }
     results = []
-    batch_size = 25
+    batch_size = 10  # Bailian text-embedding-v4 max batch size is 10
     async with httpx.AsyncClient(timeout=60) as client:
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
@@ -184,8 +215,8 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
         url = f"{embedder['base_url']}/embeddings"
         headers = {"Authorization": f"Bearer {embedder['api_key']}", "Content-Type": "application/json"}
         results = []
-        for i in range(0, len(texts), 25):
-            batch = texts[i:i + 25]
+        for i in range(0, len(texts), 10):  # Bailian max batch size is 10
+            batch = texts[i:i + 10]
             body = {"model": embedder["model"], "input": batch, "dimensions": embedder["dim"]}
             resp = httpx.post(url, json=body, headers=headers, timeout=60)
             resp.raise_for_status()

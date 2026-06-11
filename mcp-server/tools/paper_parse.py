@@ -237,6 +237,13 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
     try:
         texts = [c["text"] for c in all_chunks]
         embeddings = await embed_batch_async(texts)
+        # 校验向量维度
+        if embeddings and len(embeddings[0]) != 1024:
+            actual_dim = len(embeddings[0])
+            logger.warning(
+                "Embedding dimension mismatch: got %d, expected 1024. "
+                "Milvus insertion will fail. Check DASHSCOPE_API_KEY.", actual_dim
+            )
     except Exception as e:
         logger.warning("Embedding failed, saving chunks without vectors: %s", e)
         embeddings = None
