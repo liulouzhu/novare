@@ -61,6 +61,11 @@ class DockerSandboxManager:
         # Use absolute path so Docker treats it as a bind mount, not a named volume
         base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
         workspace = os.path.join(base_dir, "data", "workspaces", user_id)
+
+        # Ensure host directories exist before bind-mounting
+        os.makedirs(f"{workspace}/data", exist_ok=True)
+        os.makedirs(f"{workspace}/output", exist_ok=True)
+
         container = self.client.containers.run(
             IMAGE,
             detach=True,
@@ -75,7 +80,12 @@ class DockerSandboxManager:
             security_opt=["no-new-privileges"],
             cap_drop=["ALL"],
             user="1000:1000",
-            tmpfs={"/tmp": "size=256m"},
+            tmpfs={
+                "/tmp": "size=256m",
+                "/home/sandbox": "size=64m",
+                "/var/tmp": "size=64m",
+                "/code": "size=64m",
+            },
             volumes={
                 f"{workspace}/data": {"bind": "/data", "mode": "ro"},
                 f"{workspace}/output": {"bind": "/output", "mode": "rw"},
