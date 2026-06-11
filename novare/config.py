@@ -89,6 +89,14 @@ class NovareConfig:
         if sub_turn_timeout:
             cfg.subagent_turn_timeout = int(sub_turn_timeout)
 
+        # 长期记忆
+        enable_memory = os.environ.get("NOVARE_ENABLE_LONG_TERM_MEMORY")
+        if enable_memory is not None:
+            cfg.enable_long_term_memory = enable_memory.lower() in ("1", "true", "yes")
+        max_mem = os.environ.get("NOVARE_MAX_MEMORIES_PER_USER")
+        if max_mem:
+            cfg.max_memories_per_user = int(max_mem)
+
         # 配置文件
         path = Path(config_path).resolve() if config_path else cfg.workspace / ".novare" / "config.json"
         if path.exists():
