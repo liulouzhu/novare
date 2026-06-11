@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import TYPE_CHECKING, Callable
@@ -62,6 +63,7 @@ async def run_subagent(
     context: dict | None = None,
     on_tool: Callable | None = None,
     tool_context: dict | None = None,
+    turn_timeout: int = 600,
 ) -> str:
     """执行子智能体任务
 
@@ -80,6 +82,7 @@ async def run_subagent(
         context: 额外上下文（如论文 ID 列表）
         on_tool: 工具状态回调
         tool_context: 传递给子智能体工具的上下文（如 user_id，用于多用户隔离）
+        turn_timeout: 单轮超时秒数（默认 600，即 10 分钟）
 
     Returns:
         子智能体的最终文本输出
@@ -108,6 +111,7 @@ async def run_subagent(
             system_prompt=full_system_prompt,
             max_iterations=max_iterations,
             auto_compact_threshold=0,  # 子智能体禁用自动压缩
+            turn_timeout=turn_timeout,
         )
 
         # 6. 执行

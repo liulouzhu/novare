@@ -143,6 +143,7 @@ async def main():
         tool_registry=tool_registry,
         system_prompt=config.system_prompt,
         max_iterations=config.max_iterations,
+        turn_timeout=config.turn_timeout,
     )
 
     # 初始化子智能体系统
@@ -154,6 +155,7 @@ async def main():
         system_prompt=config.system_prompt,
         workspace=config.workspace,
         default_max_iterations=config.subagent_max_iterations,
+        turn_timeout=config.subagent_turn_timeout,
     )
 
     # 发现 Skills：系统公共 + 用户私有

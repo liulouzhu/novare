@@ -107,6 +107,7 @@ class AgentService:
             max_iterations=self.config.max_iterations,
             auto_compact_threshold=self.config.auto_compact_threshold,
             preserve_recent_messages=self.config.preserve_recent_messages,
+            turn_timeout=self.config.turn_timeout,
         )
 
         # 初始化子智能体系统
@@ -118,6 +119,7 @@ class AgentService:
             system_prompt=self.config.system_prompt,
             workspace=self.config.workspace,
             default_max_iterations=self.config.subagent_max_iterations,
+            turn_timeout=self.config.subagent_turn_timeout,
         )
 
         mode = "dual-model" if self.reviewer_llm else "single-model"

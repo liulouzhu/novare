@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -52,6 +53,7 @@ class AgentLoop:
         reviewer_llm: LLMClient | None = None,
         auto_compact_threshold: int = 100_000,
         preserve_recent_messages: int = 4,
+        turn_timeout: int = 300,
     ):
         self.llm_client = llm_client
         self.tool_registry: ToolExecutor = tool_registry
@@ -61,6 +63,7 @@ class AgentLoop:
         self.usage_tracker = UsageTracker()
         self.auto_compact_threshold = auto_compact_threshold
         self.preserve_recent_messages = preserve_recent_messages
+        self.turn_timeout = turn_timeout
 
     async def run_turn(
         self,
@@ -71,7 +74,29 @@ class AgentLoop:
         tool_context: dict | None = None,
         on_task_state: Callable[[dict], None] | None = None,
     ) -> str:
-        """执行一轮对话：用户输入 → LLM（流式） → 工具循环 → 最终回答
+        """执行一轮对话，带 per-turn 超时保护。
+
+        超时时返回友好提示，已执行的工具调用和消息保留在 session 中。
+        """
+        try:
+            return await asyncio.wait_for(
+                self._run_turn_core(session, user_input, on_text, on_tool, tool_context, on_task_state),
+                timeout=self.turn_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Turn timed out after %ds (user_input=%s)", self.turn_timeout, user_input[:80])
+            return f"本轮任务超时（超过 {self.turn_timeout} 秒），请简化问题或拆分为更小的子任务后重试。"
+
+    async def _run_turn_core(
+        self,
+        session,
+        user_input: str,
+        on_text: Callable[[str], None] | None = None,
+        on_tool: Callable[[str, str, dict, str | None, float | None], None] | None = None,
+        tool_context: dict | None = None,
+        on_task_state: Callable[[dict], None] | None = None,
+    ) -> str:
+        """执行一轮对话的核心逻辑：用户输入 → LLM（流式） → 工具循环 → 最终回答
 
         on_text: 可选回调，流式输出时逐 chunk 调用，用于实时打印文本。
         on_tool: 可选回调，工具状态事件。

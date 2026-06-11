@@ -44,6 +44,10 @@ class NovareConfig:
     max_iterations: int = 20                # 主 agent 最大工具调用轮次
     subagent_max_iterations: int = 16       # 子智能体最大工具调用轮次
 
+    # 超时（秒）
+    turn_timeout: int = 300                 # 主 agent 单轮超时（默认 5 分钟）
+    subagent_turn_timeout: int = 600        # 子智能体单轮超时（默认 10 分钟）
+
     @classmethod
     def load(cls, config_path: str | Path | None = None) -> "NovareConfig":
         """从 .env 文件、环境变量和配置文件加载配置"""
@@ -77,6 +81,13 @@ class NovareConfig:
         sub_max_iter = os.environ.get("NOVARE_SUBAGENT_MAX_ITERATIONS")
         if sub_max_iter:
             cfg.subagent_max_iterations = int(sub_max_iter)
+
+        turn_timeout = os.environ.get("NOVARE_TURN_TIMEOUT")
+        if turn_timeout:
+            cfg.turn_timeout = int(turn_timeout)
+        sub_turn_timeout = os.environ.get("NOVARE_SUBAGENT_TURN_TIMEOUT")
+        if sub_turn_timeout:
+            cfg.subagent_turn_timeout = int(sub_turn_timeout)
 
         # 配置文件
         path = Path(config_path).resolve() if config_path else cfg.workspace / ".novare" / "config.json"

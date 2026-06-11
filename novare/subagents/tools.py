@@ -45,6 +45,7 @@ async def handle_spawn_subagent(args: dict, **kwargs) -> str:
     system_prompt: str = kwargs.get("system_prompt", "")
     user_id: str | None = kwargs.get("user_id")
     default_max_iterations: int = kwargs.get("default_max_iterations", 16)
+    turn_timeout: int = kwargs.get("turn_timeout", 600)
 
     # 解析参数
     type_str = args.get("subagent_type", "general")
@@ -81,6 +82,7 @@ async def handle_spawn_subagent(args: dict, **kwargs) -> str:
         max_iterations=max_iterations,
         context=context,
         tool_context={"user_id": user_id} if user_id else None,
+        turn_timeout=turn_timeout,
     )
 
     if await_result:
@@ -152,6 +154,7 @@ def register_subagent_tools(
     system_prompt: str,
     workspace,
     default_max_iterations: int = 16,
+    turn_timeout: int = 600,
 ) -> None:
     """在工具注册表中注册子智能体相关的工具
 
@@ -175,6 +178,7 @@ def register_subagent_tools(
         "system_prompt": system_prompt,
         "workspace": workspace,
         "default_max_iterations": default_max_iterations,
+        "turn_timeout": turn_timeout,
     }
 
     # ── spawn_subagent ──
