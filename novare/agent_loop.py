@@ -72,14 +72,16 @@ class AgentLoop:
         on_tool: Callable[[str, str, dict, str | None, float | None], None] | None = None,
         tool_context: dict | None = None,
         on_task_state: Callable[[dict], None] | None = None,
+        system_prompt: str | None = None,
     ) -> str:
         """执行一轮对话，带 per-turn 超时保护。
 
+        system_prompt: 可选的 per-turn 覆盖，不传则使用 self.system_prompt。
         超时时返回友好提示，已执行的工具调用和消息保留在 session 中。
         """
         try:
             return await asyncio.wait_for(
-                self._run_turn_core(session, user_input, on_text, on_tool, tool_context, on_task_state),
+                self._run_turn_core(session, user_input, on_text, on_tool, tool_context, on_task_state, system_prompt),
                 timeout=self.turn_timeout,
             )
         except asyncio.TimeoutError:
@@ -94,6 +96,7 @@ class AgentLoop:
         on_tool: Callable[[str, str, dict, str | None, float | None], None] | None = None,
         tool_context: dict | None = None,
         on_task_state: Callable[[dict], None] | None = None,
+        system_prompt: str | None = None,
     ) -> str:
         """执行一轮对话的核心逻辑：用户输入 → LLM（流式） → 工具循环 → 最终回答
 
@@ -103,7 +106,11 @@ class AgentLoop:
                  event: "start" | "end" | "error"
         on_task_state: 可选回调，工具循环结束后推送当前任务状态快照。
                        签名：(state_dict: dict)
+        system_prompt: 可选的 per-turn 覆盖，不传则使用 self.system_prompt。
         """
+        # 当前 turn 使用的 system_prompt（per-turn 覆盖 > 实例默认值）
+        effective_prompt = system_prompt if system_prompt is not None else self.system_prompt
+
         # ── Turn-scoped TaskState：每次 run_turn 独立持有 ──
         task_mgr = TaskStateManager()
         task_mgr.init_turn(user_input)
@@ -119,11 +126,11 @@ class AgentLoop:
 
             for iteration in range(self.max_iterations):
                 # 构建消息（注入当前 task state，可能已被压缩）
-                messages = self._build_messages(session, task_state=task_mgr.state)
+                messages = self._build_messages(session, task_state=task_mgr.state, system_prompt=effective_prompt)
 
                 # Preflight：估算 system + messages + tools 是否超过阈值，超过则先压缩
-                if self._preflight_compact(session, messages, task_mgr.state):
-                    messages = self._build_messages(session, task_state=task_mgr.state)
+                if self._preflight_compact(session, messages, task_mgr.state, system_prompt=effective_prompt):
+                    messages = self._build_messages(session, task_state=task_mgr.state, system_prompt=effective_prompt)
 
                 # 流式调用 LLM，on_text 实时输出
                 tools = self.tool_registry.to_openai_tools()
@@ -144,7 +151,7 @@ class AgentLoop:
                 # 如果没有工具调用，检查是否需要压缩后返回
                 if not response.tool_calls:
                     session.add_assistant_message(response.content)
-                    self._maybe_auto_compact(session)
+                    self._maybe_auto_compact(session, system_prompt=effective_prompt)
                     return response.content
 
                 # 有工具调用：记录 assistant 消息（含 tool_calls）
@@ -182,7 +189,7 @@ class AgentLoop:
                     on_task_state(task_mgr.state.to_dict())
 
                 # 每轮工具循环结束后检查是否需要压缩
-                self._maybe_auto_compact(session)
+                self._maybe_auto_compact(session, system_prompt=effective_prompt)
 
             return "达到最大迭代次数（{}），请简化问题后重试。".format(self.max_iterations)
         finally:
@@ -209,18 +216,20 @@ class AgentLoop:
         response = await self.reviewer_llm.collect_stream(messages, on_text=on_text)
         return response.content or ""
 
-    def _build_messages(self, session, task_state: TaskState | None = None) -> list[dict]:
+    def _build_messages(self, session, task_state: TaskState | None = None, system_prompt: str | None = None) -> list[dict]:
         """构建发送给 LLM 的消息列表
 
         task_state: 可选的任务状态，如果存在则追加到 system prompt 末尾。
+        system_prompt: 可选的 per-turn 覆盖，不传则使用 self.system_prompt。
         每次迭代由 run_turn 传入当前 turn 的局部 task state。
 
         注意：session.messages 可能已被 _maybe_auto_compact() 压缩过，
         此处直接使用，不再重复裁剪。
         """
+        effective = system_prompt if system_prompt is not None else self.system_prompt
         messages = []
-        if self.system_prompt:
-            system_content = self.system_prompt
+        if effective:
+            system_content = effective
             # 注入任务状态（如果有的话）
             if task_state:
                 system_content += "\n\n" + task_state.to_prompt_block()
@@ -228,7 +237,7 @@ class AgentLoop:
         messages.extend(session.messages)
         return messages
 
-    def _preflight_compact(self, session, messages: list[dict], task_state: TaskState | None = None) -> bool:
+    def _preflight_compact(self, session, messages: list[dict], task_state: TaskState | None = None, system_prompt: str | None = None) -> bool:
         """LLM 调用前的预检：估算 system + messages + tools 总量，超过阈值则先压缩。
 
         解决的问题：post-turn 压缩来不及——如果单次请求本身已超上下文窗口，
@@ -254,7 +263,7 @@ class AgentLoop:
 
         compacted, did_compact = compact_messages(
             session.messages,
-            self.system_prompt,
+            system_prompt if system_prompt is not None else self.system_prompt,
             preserve_recent=self.preserve_recent_messages,
         )
 
@@ -267,7 +276,7 @@ class AgentLoop:
 
         return False
 
-    def _maybe_auto_compact(self, session) -> bool:
+    def _maybe_auto_compact(self, session, system_prompt: str | None = None) -> bool:
         """检查是否需要自动压缩，如果需要则执行压缩
 
         借鉴 Claw Code 的 maybe_auto_compact() 策略：
@@ -291,7 +300,7 @@ class AgentLoop:
         # 传入完整 session.messages，compact_messages 内部会处理
         compacted, did_compact = compact_messages(
             session.messages,
-            self.system_prompt,
+            system_prompt if system_prompt is not None else self.system_prompt,
             preserve_recent=self.preserve_recent_messages,
         )
 
