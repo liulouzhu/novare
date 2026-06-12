@@ -143,10 +143,7 @@ class NovareConfig:
                     args=[str(mcp_server_py)],
                     env={
                         "RESEARCH_DATA_DIR": str(cfg.data_dir),
-                        "DATABASE_URL": os.getenv(
-                            "DATABASE_URL",
-                            "postgresql://postgres:123456@localhost:5432/research_agent",
-                        ),
+                        "DATABASE_URL": os.environ["DATABASE_URL"],
                     },
                 )
 
