@@ -24,6 +24,45 @@ router = APIRouter(prefix="/api/papers", tags=["papers"])
 _optional_bearer = HTTPBearer(auto_error=False)
 
 
+def _is_relative_to(path: Path, root: Path) -> bool:
+    """判断 path 是否在 root 之下（兼容 Python <3.9）。"""
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _public_papers_dir() -> Path:
+    """全局公共 PDF 缓存目录（与 mcp-server/tools/paper_parse.py 保持一致）。"""
+    return Path(os.environ.get("RESEARCH_DATA_DIR", "./data")) / "public_papers"
+
+
+def _is_public_cached_pdf(pdf_path: str) -> bool:
+    """判断 pdf_path 是否位于公共论文缓存目录下。"""
+    try:
+        return _is_relative_to(Path(pdf_path), _public_papers_dir())
+    except Exception:
+        return False
+
+
+def _can_view_local_pdf(paper, user: User, user_paper_repo: UserPaperRepository) -> bool:
+    """判断用户是否有权读取本地 PDF 文件。
+
+    - owner → 允许
+    - UserPaper.has_fulltext_access → 允许
+    - public paper + pdf_path 在公共缓存目录 → 允许
+    - 其他 → 拒绝
+    """
+    if paper.created_by_user_id == user.id:
+        return True
+    if user_paper_repo.has_fulltext_access(paper.id):
+        return True
+    if paper.visibility == "public" and paper.pdf_path and _is_public_cached_pdf(paper.pdf_path):
+        return True
+    return False
+
+
 def _paper_to_out(paper, is_parsed: bool) -> dict:
     """将 ORM Paper 对象转为 PaperOut dict"""
     authors = paper.authors if isinstance(paper.authors, list) else []
@@ -128,12 +167,7 @@ async def get_paper_pdf(
         if user is None:
             raise HTTPException(status_code=401, detail="Authentication required to access local PDF")
         user_paper_repo = UserPaperRepository(db, user.id)
-        is_owner = (
-            paper.visibility == "public"
-            or paper.created_by_user_id == user.id
-            or user_paper_repo.has_fulltext_access(paper_id)
-        )
-        if not is_owner:
+        if not _can_view_local_pdf(paper, user, user_paper_repo):
             raise HTTPException(status_code=403, detail="You do not have access to this paper's PDF")
         return FileResponse(
             paper.pdf_path,
