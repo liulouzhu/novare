@@ -22,3 +22,4 @@ web/frontend/.vite/
 # User workspace (sessions, uploads, papers)
 workspace/
 _title_check.txt
+.claw.json
