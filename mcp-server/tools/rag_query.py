@@ -5,13 +5,14 @@ import os
 
 import numpy as np
 
-from core.database import get_connection, get_all_embeddings
+from core.database import get_connection, get_embeddings_by_paper_ids
 from core.embedding import embed_text_async
 from tools.result import ok, fail, truncate, MAX_CHUNK_TEXT
 
 logger = logging.getLogger("research-server.rag_query")
 
 DEFAULT_USER_ID = os.getenv("RAG_DEFAULT_USER", "default")
+ALLOW_UNSCOPED = os.getenv("RAG_ALLOW_UNSCOPED", "").lower() in ("1", "true", "yes")
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -24,52 +25,53 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(dot / (norm_a * norm_b))
 
 
-def _get_user_paper_ids(user_id: str) -> set[str] | None:
-    """Get paper_ids where user has fulltext access (parsed/uploaded).
-    Returns None if user_id is not provided or lookup fails."""
+def _get_user_paper_ids(user_id: str) -> set[str]:
+    """Get paper_ids where user has fulltext access.
+
+    Raises on any failure (fail-closed).  Returns an empty set when the
+    user simply has no papers — callers treat that as "no results".
+    """
     if not user_id:
-        return None
+        raise PermissionError("user_id is required for RAG search")
+
+    from web.backend.db.base import SessionLocal
+    from web.backend.db.models import UserPaper
+    from uuid import UUID
+
+    db = SessionLocal()
     try:
-        from web.backend.db.base import SessionLocal
-        from web.backend.db.models import UserPaper
-        from uuid import UUID
-        db = SessionLocal()
-        try:
-            return {
-                str(up.paper_id)
-                for up in db.query(UserPaper.paper_id)
-                .filter(
-                    UserPaper.user_id == UUID(user_id),
-                    UserPaper.has_fulltext_access.is_(True),
-                )
-                .all()
-            }
-        finally:
-            db.close()
-    except Exception as e:
-        logger.warning("Failed to get user papers for filtering: %s", e)
-        return None
+        return {
+            str(up.paper_id)
+            for up in db.query(UserPaper.paper_id)
+            .filter(
+                UserPaper.user_id == UUID(user_id),
+                UserPaper.has_fulltext_access.is_(True),
+            )
+            .all()
+        }
+    finally:
+        db.close()
 
 
 def _brute_force_search(
-    query_vec: np.ndarray, top_k: int, user_id: str = None
-) -> list[dict]:
-    """Fallback: brute-force numpy cosine similarity over all SQLite embeddings."""
-    allowed_paper_ids = _get_user_paper_ids(user_id)
-    if user_id and allowed_paper_ids is not None and not allowed_paper_ids:
-        return []  # User has no papers — empty result
+    query_vec: np.ndarray, top_k: int, allowed_paper_ids: set[str]
+) -> tuple[list[dict], int]:
+    """Brute-force cosine similarity scoped to *allowed_paper_ids* only.
+
+    Returns (results, total_scanned).  Never reads the full embeddings table.
+    """
+    if not allowed_paper_ids:
+        return [], 0
 
     with get_connection() as conn:
-        all_embeddings = get_all_embeddings(conn)
+        scoped_embeddings = get_embeddings_by_paper_ids(conn, allowed_paper_ids)
 
-    if not all_embeddings:
-        return []
+    if not scoped_embeddings:
+        return [], 0
 
     results = []
     skipped_dim = 0
-    for emb in all_embeddings:
-        if allowed_paper_ids is not None and emb["paper_id"] not in allowed_paper_ids:
-            continue
+    for emb in scoped_embeddings:
         if len(emb["vec"]) != len(query_vec):
             skipped_dim += 1
             continue
@@ -90,7 +92,7 @@ def _brute_force_search(
         )
 
     results.sort(key=lambda x: x["score"], reverse=True)
-    return results[:top_k]
+    return results[:top_k], len(scoped_embeddings)
 
 
 def _milvus_search(query_vec: list[float], top_k: int, user_id: str) -> list[dict]:
@@ -126,12 +128,21 @@ def _milvus_search(query_vec: list[float], top_k: int, user_id: str) -> list[dic
 
 
 async def handle_rag_query(args: dict, user_id: str = None) -> str:
-    """RAG 语义检索入口 — Milvus 优先，brute-force fallback。返回统一 JSON。"""
+    """RAG 语义检索入口 — Milvus 优先，brute-force fallback。返回统一 JSON。
+
+    安全策略：默认 fail-closed。
+    - 无 user_id 且未显式启用 RAG_ALLOW_UNSCOPED → 拒绝。
+    - 用户权限查询失败 → 拒绝（不降级为全库检索）。
+    """
     question = args.get("question", "").strip()
     if not question:
         return fail("rag_query", "请提供查询问题。")
 
     top_k = args.get("top_k", 5)
+
+    # ── 权限校验：无 user_id 时默认拒绝 ──
+    if not user_id and not ALLOW_UNSCOPED:
+        return fail("rag_query", "缺少 user_id，无法执行安全的 RAG 检索。请在 Web 模式下使用。")
 
     # 计算查询向量
     try:
@@ -140,23 +151,63 @@ async def handle_rag_query(args: dict, user_id: str = None) -> str:
     except Exception as e:
         return fail("rag_query", f"查询向量化失败 - {e}")
 
+    # ── 解析用户可访问的 paper_id 集合（fail-closed）──
+    allowed_paper_ids: set[str] | None = None
+    if user_id:
+        try:
+            allowed_paper_ids = _get_user_paper_ids(user_id)
+        except Exception as e:
+            logger.error("RAG authorization failed for user %s: %s", user_id, e)
+            return fail("rag_query", f"无法验证用户论文权限，检索已中止: {e}")
+        if not allowed_paper_ids:
+            return fail("rag_query", "您没有已解析全文的论文。请先使用 paper_parse 解析至少一篇论文。")
+
     top_results = []
     search_method = "brute-force"
+    total_chunks = 0
 
-    # 1. Try Milvus first
+    # 1. Try Milvus first (Milvus 自身按 user_id partition 隔离)
     try:
-        top_results = _milvus_search(query_vec_list, top_k, user_id or DEFAULT_USER_ID)
+        milvus_user = user_id or DEFAULT_USER_ID
+        top_results = _milvus_search(query_vec_list, top_k, milvus_user)
         if top_results:
             search_method = "Milvus"
+            total_chunks = len(top_results)
     except Exception as e:
         logger.warning("Milvus search failed, falling back to brute force: %s", e)
 
-    # 2. Fallback: brute-force numpy search
+    # 2. Fallback: brute-force numpy search (scoped to allowed_paper_ids only)
     if not top_results:
-        top_results = _brute_force_search(query_vec, top_k, user_id=user_id)
+        if not user_id and ALLOW_UNSCOPED:
+            # CLI 显式放行：读取全库（仅限开发/单用户场景）
+            from core.database import get_all_embeddings
+            with get_connection() as conn:
+                all_embeddings = get_all_embeddings(conn)
+            if not all_embeddings:
+                return fail("rag_query", "论文库为空。请先使用 paper_parse 解析至少一篇论文。")
+            results = []
+            for emb in all_embeddings:
+                if len(emb["vec"]) != len(query_vec):
+                    continue
+                score = _cosine_similarity(query_vec, emb["vec"])
+                results.append({
+                    "score": score,
+                    "chunk_id": emb["chunk_id"],
+                    "text": emb["text"],
+                    "section": emb["section"],
+                    "paper_id": emb["paper_id"],
+                    "title": emb["title"],
+                })
+            results.sort(key=lambda x: x["score"], reverse=True)
+            top_results = results[:top_k]
+            total_chunks = len(all_embeddings)
+        else:
+            top_results, total_chunks = _brute_force_search(
+                query_vec, top_k, allowed_paper_ids,
+            )
 
     if not top_results:
-        return fail("rag_query", "论文库为空。请先使用 paper_parse 解析至少一篇论文。")
+        return fail("rag_query", "未找到相关内容。")
 
     # ── 构建结构化结果 ──
     results_json = []
@@ -179,14 +230,6 @@ async def handle_rag_query(args: dict, user_id: str = None) -> str:
         })
 
     unique_papers = len(set(r["paper_id"] for r in top_results))
-
-    # Count total chunks
-    if search_method == "Milvus":
-        total_chunks = len(top_results)
-    else:
-        with get_connection() as conn:
-            all_embeddings = get_all_embeddings(conn)
-        total_chunks = len(all_embeddings)
 
     return ok(
         "rag_query",

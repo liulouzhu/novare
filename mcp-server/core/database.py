@@ -214,6 +214,39 @@ def get_all_embeddings(conn) -> list[dict]:
     return results
 
 
+def get_embeddings_by_paper_ids(conn, paper_ids: set[str] | list[str]) -> list[dict]:
+    """仅获取指定 paper_ids 对应的向量（Web 多用户隔离查询）。
+
+    返回结构与 get_all_embeddings() 一致。
+    """
+    from web.backend.db.models import Embedding, Chunk, Paper
+
+    if not paper_ids:
+        return []
+
+    paper_id_list = list(paper_ids)
+    rows = (
+        conn.query(Embedding, Chunk, Paper)
+        .join(Chunk, Embedding.chunk_id == Chunk.id)
+        .join(Paper, Chunk.paper_id == Paper.id)
+        .filter(Chunk.paper_id.in_(paper_id_list))
+        .all()
+    )
+    results = []
+    for emb, chunk, paper in rows:
+        vec = np.frombuffer(emb.vec, dtype=np.float32).copy()
+        results.append({
+            "chunk_id": emb.chunk_id,
+            "dim": emb.dim,
+            "vec": vec,
+            "text": chunk.text,
+            "section": chunk.section,
+            "paper_id": chunk.paper_id,
+            "title": paper.title,
+        })
+    return results
+
+
 # ── Citation CRUD ─────────────────────────────────────────────────────────
 
 def insert_citation(conn, source_id: str, target_id: str) -> None:
