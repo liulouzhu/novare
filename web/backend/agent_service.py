@@ -337,11 +337,14 @@ class AgentService:
             def on_task_state(state_dict: dict):
                 queue.put_nowait({"type": "task_state", **state_dict})
 
+            # tool_context 注入：user_id 供 MCP 工具使用，workspace 供文件类 builtin 工具隔离
+            ctx = {"user_id": user_id, "workspace": str(self._workspace_for(user_id))} if user_id else None
+
             result = await self.agent.run_turn(
                 session, user_input,
                 on_text=on_text,
                 on_tool=on_tool,
-                tool_context={"user_id": user_id} if user_id else None,
+                tool_context=ctx,
                 on_task_state=on_task_state,
                 system_prompt=turn_system_prompt,
                 autosave=False,

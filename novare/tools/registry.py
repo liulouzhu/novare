@@ -143,6 +143,10 @@ _BUILTIN_TOOLS: list[dict] = [
 ]
 
 
+# Web 多用户隔离：这些工具的 workspace 可被 tool_context 覆盖
+_FILE_TOOLS = {"read_file", "write_file", "edit_file", "glob_search", "grep_search"}
+
+
 class ToolRegistry:
     def __init__(self, workspace: Path = Path(".")):
         self.workspace = workspace
@@ -189,6 +193,9 @@ class ToolRegistry:
 
         try:
             kwargs = {"workspace": self.workspace}
+            # Web 多用户隔离：文件类 builtin 工具可用 tool_context["workspace"] 覆盖
+            if name in _FILE_TOOLS and tool_context and "workspace" in tool_context:
+                kwargs["workspace"] = Path(tool_context["workspace"])
             # MCP 工具和需要上下文的内置工具（如 reviewer_evaluate）传递 tool_context
             needs_context = tool.source.startswith("mcp:") or tool.source == "builtin:context"
             if needs_context:
