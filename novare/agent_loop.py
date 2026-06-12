@@ -10,7 +10,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Awaitable, Callable, Protocol, runtime_checkable
 
 from novare.context_manager import (
     TokenUsage,
@@ -73,15 +73,19 @@ class AgentLoop:
         tool_context: dict | None = None,
         on_task_state: Callable[[dict], None] | None = None,
         system_prompt: str | None = None,
+        autosave: bool = True,
+        on_compact: Callable[[object], Awaitable[None] | None] | None = None,
     ) -> str:
         """执行一轮对话，带 per-turn 超时保护。
 
         system_prompt: 可选的 per-turn 覆盖，不传则使用 self.system_prompt。
+        autosave: compact 后是否自动 session.save() 写 JSONL。CLI 默认 True，Web 应传 False。
+        on_compact: compact 发生后的回调，上层可用于持久化 compact 后的消息（如写 DB）。
         超时时返回友好提示，已执行的工具调用和消息保留在 session 中。
         """
         try:
             return await asyncio.wait_for(
-                self._run_turn_core(session, user_input, on_text, on_tool, tool_context, on_task_state, system_prompt),
+                self._run_turn_core(session, user_input, on_text, on_tool, tool_context, on_task_state, system_prompt, autosave, on_compact),
                 timeout=self.turn_timeout,
             )
         except asyncio.TimeoutError:
@@ -97,6 +101,8 @@ class AgentLoop:
         tool_context: dict | None = None,
         on_task_state: Callable[[dict], None] | None = None,
         system_prompt: str | None = None,
+        autosave: bool = True,
+        on_compact: Callable[[object], Awaitable[None] | None] | None = None,
     ) -> str:
         """执行一轮对话的核心逻辑：用户输入 → LLM（流式） → 工具循环 → 最终回答
 
@@ -129,7 +135,7 @@ class AgentLoop:
                 messages = self._build_messages(session, task_state=task_mgr.state, system_prompt=effective_prompt)
 
                 # Preflight：估算 system + messages + tools 是否超过阈值，超过则先压缩
-                if self._preflight_compact(session, messages, task_mgr.state, system_prompt=effective_prompt):
+                if await self._preflight_compact(session, messages, task_mgr.state, system_prompt=effective_prompt, autosave=autosave, on_compact=on_compact):
                     messages = self._build_messages(session, task_state=task_mgr.state, system_prompt=effective_prompt)
 
                 # 流式调用 LLM，on_text 实时输出
@@ -151,7 +157,7 @@ class AgentLoop:
                 # 如果没有工具调用，检查是否需要压缩后返回
                 if not response.tool_calls:
                     session.add_assistant_message(response.content)
-                    self._maybe_auto_compact(session, system_prompt=effective_prompt)
+                    await self._maybe_auto_compact(session, system_prompt=effective_prompt, autosave=autosave, on_compact=on_compact)
                     return response.content
 
                 # 有工具调用：记录 assistant 消息（含 tool_calls）
@@ -189,7 +195,7 @@ class AgentLoop:
                     on_task_state(task_mgr.state.to_dict())
 
                 # 每轮工具循环结束后检查是否需要压缩
-                self._maybe_auto_compact(session, system_prompt=effective_prompt)
+                await self._maybe_auto_compact(session, system_prompt=effective_prompt, autosave=autosave, on_compact=on_compact)
 
             return "达到最大迭代次数（{}），请简化问题后重试。".format(self.max_iterations)
         finally:
@@ -237,7 +243,7 @@ class AgentLoop:
         messages.extend(session.messages)
         return messages
 
-    def _preflight_compact(self, session, messages: list[dict], task_state: TaskState | None = None, system_prompt: str | None = None) -> bool:
+    async def _preflight_compact(self, session, messages: list[dict], task_state: TaskState | None = None, system_prompt: str | None = None, autosave: bool = True, on_compact: Callable[[object], Awaitable[None] | None] | None = None) -> bool:
         """LLM 调用前的预检：估算 system + messages + tools 总量，超过阈值则先压缩。
 
         解决的问题：post-turn 压缩来不及——如果单次请求本身已超上下文窗口，
@@ -270,13 +276,18 @@ class AgentLoop:
         if did_compact:
             session.messages = compacted
             session.usage_tracker.reset_after_compact()
-            session.save()
+            if autosave:
+                session.save()
+            if on_compact:
+                result = on_compact(session)
+                if asyncio.iscoroutine(result):
+                    await result
             logger.info("Preflight compaction complete: %d messages remain", len(compacted))
             return True
 
         return False
 
-    def _maybe_auto_compact(self, session, system_prompt: str | None = None) -> bool:
+    async def _maybe_auto_compact(self, session, system_prompt: str | None = None, autosave: bool = True, on_compact: Callable[[object], Awaitable[None] | None] | None = None) -> bool:
         """检查是否需要自动压缩，如果需要则执行压缩
 
         借鉴 Claw Code 的 maybe_auto_compact() 策略：
@@ -306,8 +317,13 @@ class AgentLoop:
 
         if did_compact:
             session.messages = compacted
-            # 持久化压缩后的版本到 JSONL
-            session.save()
+            # 持久化压缩后的版本
+            if autosave:
+                session.save()
+            if on_compact:
+                result = on_compact(session)
+                if asyncio.iscoroutine(result):
+                    await result
             # 重置 usage 计数器，避免重复触发
             session.usage_tracker.reset_after_compact()
             new_tokens = estimate_messages_tokens(compacted)

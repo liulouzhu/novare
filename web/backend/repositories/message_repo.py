@@ -32,3 +32,21 @@ class MessageRepository(BaseRepository):
     def delete_by_session(self, session_id: str):
         self.db.query(MessageModel).filter(MessageModel.session_id == session_id).delete()
         self.db.flush()
+
+    def replace_session_messages(self, session_id: str, messages: list[dict]) -> None:
+        """删除该 session 的全部旧消息，按 messages 顺序重新插入。
+
+        调用方负责 commit/rollback。用于 compact 后替换 DB 中的上下文消息。
+        """
+        self.delete_by_session(session_id)
+        for msg in messages:
+            new_msg = MessageModel(
+                session_id=session_id,
+                role=msg["role"],
+                content=msg.get("content"),
+                tool_calls=msg.get("tool_calls"),
+                tool_call_id=msg.get("tool_call_id"),
+                name=msg.get("name"),
+            )
+            self.db.add(new_msg)
+        self.db.flush()

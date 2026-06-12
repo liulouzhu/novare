@@ -158,15 +158,67 @@ class AgentService:
         return self.config.workspace
 
     def load_session(self, session_id: str, user_id: str | None = None) -> Session:
-        """加载或创建会话"""
+        """加载或创建会话。Web 用户（有 user_id）从 DB 加载，否则从 JSONL。"""
         ws = self._workspace_for(user_id)
-        try:
-            return Session.load(session_id, workspace=ws)
-        except FileNotFoundError:
-            return Session(session_id=session_id, workspace=ws)
+        session = Session(session_id=session_id, workspace=ws)
+
+        if user_id:
+            # Web 模式：从 PostgreSQL 加载消息
+            try:
+                from uuid import UUID
+                db = SessionLocal()
+                try:
+                    msg_repo = MessageRepository(db, UUID(user_id))
+                    messages = msg_repo.get_messages(session_id)
+                    session.messages = [
+                        {
+                            "role": m.role,
+                            "content": m.content or "",
+                            **({"tool_calls": m.tool_calls} if m.tool_calls else {}),
+                            **({"tool_call_id": m.tool_call_id} if m.tool_call_id else {}),
+                        }
+                        for m in messages
+                    ]
+                finally:
+                    db.close()
+            except Exception:
+                logger.exception("Failed to load session from DB, returning empty session")
+            return session
+        else:
+            # CLI 模式：从 JSONL 加载
+            try:
+                return Session.load(session_id, workspace=ws)
+            except FileNotFoundError:
+                return session
 
     def list_sessions(self, user_id: str | None = None) -> list[dict]:
-        """列出所有会话（简略信息）"""
+        """列出所有会话（简略信息）。Web 用户从 DB 查询。"""
+        if user_id:
+            try:
+                from uuid import UUID
+                db = SessionLocal()
+                try:
+                    session_repo = SessionRepository(db, UUID(user_id))
+                    msg_repo = MessageRepository(db, UUID(user_id))
+                    sessions = session_repo.list_all()
+                    result = []
+                    for s in sessions:
+                        messages = msg_repo.get_messages(s.id)
+                        title = s.title or _extract_title([{"role": m.role, "content": m.content} for m in messages])
+                        result.append({
+                            "session_id": s.id,
+                            "title": title,
+                            "message_count": len(messages),
+                            "updated_at": s.updated_at.isoformat() if s.updated_at else "",
+                        })
+                    return result
+                finally:
+                    db.close()
+            except Exception:
+                logger.exception("Failed to list sessions from DB")
+                return []
+
+        # CLI 模式：从 JSONL
         ws = self._workspace_for(user_id)
         sessions = Session.list_sessions(workspace=ws)
         result = []
@@ -189,7 +241,25 @@ class AgentService:
         return Session(workspace=self._workspace_for(user_id))
 
     def delete_session(self, session_id: str, user_id: str | None = None):
-        """删除会话"""
+        """删除会话。Web 用户从 DB 删除。"""
+        if user_id:
+            try:
+                from uuid import UUID
+                db = SessionLocal()
+                try:
+                    repo = SessionRepository(db, UUID(user_id))
+                    repo.delete(session_id)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
+                finally:
+                    db.close()
+            except Exception:
+                logger.exception("Failed to delete session from DB")
+            return
+
+        # CLI 模式：删除 JSONL
         session = Session(session_id=session_id, workspace=self._workspace_for(user_id))
         session.delete()
 
@@ -256,6 +326,13 @@ class AgentService:
             # 记录本轮前的消息数，用于提取新增消息
             msgs_before = len(session.messages)
 
+            # compact 标记：on_compact 回调中置为 True
+            compacted = False
+
+            def _on_compact(_session):
+                nonlocal compacted
+                compacted = True
+
             # task state 推送回调
             def on_task_state(state_dict: dict):
                 queue.put_nowait({"type": "task_state", **state_dict})
@@ -267,6 +344,8 @@ class AgentService:
                 tool_context={"user_id": user_id} if user_id else None,
                 on_task_state=on_task_state,
                 system_prompt=turn_system_prompt,
+                autosave=False,
+                on_compact=_on_compact,
             )
 
             # ── 持久化到 PostgreSQL（仅当 user_id 存在时） ──
@@ -283,18 +362,22 @@ class AgentService:
                         elif session_model.title in ("", "新会话", "New Chat"):
                             session_repo.update_title(session.session_id, _extract_title_from_text(user_input))
 
-                        # 增量追加本轮新消息到 DB
-                        new_messages = session.messages[msgs_before:]
-                        if new_messages:
-                            msg_repo = MessageRepository(db, user_uuid)
-                            for msg in new_messages:
-                                msg_repo.add_message(
-                                    session_id=session.session_id,
-                                    role=msg["role"],
-                                    content=msg.get("content"),
-                                    tool_calls=msg.get("tool_calls"),
-                                    tool_call_id=msg.get("tool_call_id"),
-                                )
+                        msg_repo = MessageRepository(db, user_uuid)
+                        if compacted:
+                            # compact 发生后，用完整 session.messages 替换 DB
+                            msg_repo.replace_session_messages(session.session_id, session.messages)
+                        else:
+                            # 正常无 compact：增量追加本轮新消息
+                            new_messages = session.messages[msgs_before:]
+                            if new_messages:
+                                for msg in new_messages:
+                                    msg_repo.add_message(
+                                        session_id=session.session_id,
+                                        role=msg["role"],
+                                        content=msg.get("content"),
+                                        tool_calls=msg.get("tool_calls"),
+                                        tool_call_id=msg.get("tool_call_id"),
+                                    )
                         db.commit()
                     except Exception:
                         db.rollback()
@@ -304,13 +387,13 @@ class AgentService:
                 except Exception:
                     logger.exception("DB persistence error (non-fatal)")
 
-            # ── 持久化到 JSONL（agent loop 需要） ──
-            session.save()
+            # ── Web 模式不写 JSONL，DB 是唯一持久化来源 ──
 
             # ── 先通知客户端完成，记忆提取放后台不阻塞 ──
             await queue.put({"type": "done"})
 
             if user_id and self.memory_service and self.llm_client:
+                new_messages = session.messages[msgs_before:]
                 try:
                     _bg = asyncio.create_task(
                         self.memory_service.extract_and_save(
