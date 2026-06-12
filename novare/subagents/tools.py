@@ -44,6 +44,7 @@ async def handle_spawn_subagent(args: dict, **kwargs) -> str:
     llm_client: LLMClient = kwargs.get("llm_client")
     system_prompt: str = kwargs.get("system_prompt", "")
     user_id: str | None = kwargs.get("user_id")
+    workspace = kwargs.get("workspace")
     default_max_iterations: int = kwargs.get("default_max_iterations", 16)
     turn_timeout: int = kwargs.get("turn_timeout", 600)
 
@@ -70,6 +71,13 @@ async def handle_spawn_subagent(args: dict, **kwargs) -> str:
     # 创建子智能体记录
     record = registry.create(subagent_type, task)
 
+    # 构建子智能体 tool_context（继承父 agent 的 user_id 和 workspace）
+    child_tool_context = None
+    if user_id:
+        child_tool_context = {"user_id": user_id}
+        if workspace:
+            child_tool_context["workspace"] = str(workspace)
+
     # 构建协程
     coro = run_subagent(
         subagent_id=record.subagent_id,
@@ -81,7 +89,7 @@ async def handle_spawn_subagent(args: dict, **kwargs) -> str:
         registry=registry,
         max_iterations=max_iterations,
         context=context,
-        tool_context={"user_id": user_id} if user_id else None,
+        tool_context=child_tool_context,
         turn_timeout=turn_timeout,
     )
 
