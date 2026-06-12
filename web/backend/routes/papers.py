@@ -16,7 +16,7 @@ from web.backend.db.models import User, Chunk
 from web.backend.auth.dependencies import get_current_user
 from web.backend.auth.service import decode_access_token
 from web.backend.repositories import PaperRepository, UserPaperRepository
-from web.backend.models import PaperOut
+from web.backend.models import PaperFullTextOut, PaperOut
 
 logger = logging.getLogger("novare.web.papers")
 router = APIRouter(prefix="/api/papers", tags=["papers"])
@@ -39,6 +39,55 @@ def _paper_to_out(paper, is_parsed: bool) -> dict:
         "citation_count": paper.citation_count or 0,
         "is_parsed": is_parsed,
         "created_at": paper.created_at.isoformat() if paper.created_at else None,
+    }
+
+
+def _can_view_paper_text(paper, user: User, user_paper_repo: UserPaperRepository) -> bool:
+    return (
+        paper.created_by_user_id == user.id
+        or user_paper_repo.has_fulltext_access(paper.id)
+    )
+
+
+def _get_ordered_chunks(db: Session, paper_id: str) -> list[Chunk]:
+    return (
+        db.query(Chunk)
+        .filter(Chunk.paper_id == paper_id)
+        .order_by(Chunk.ordinal)
+        .all()
+    )
+
+
+def _chunks_to_fulltext(paper, chunks: list[Chunk]) -> dict:
+    sections_by_name: dict[str, dict] = {}
+    for chunk in chunks:
+        section_name = (chunk.section or "").strip() or "正文"
+        section = sections_by_name.setdefault(
+            section_name,
+            {"section": section_name, "parts": [], "chunk_count": 0},
+        )
+        text = (chunk.text or "").strip()
+        if text:
+            section["parts"].append(text)
+        section["chunk_count"] += 1
+
+    sections = [
+        {
+            "section": section["section"],
+            "text": "\n\n".join(section["parts"]).strip(),
+            "chunk_count": section["chunk_count"],
+        }
+        for section in sections_by_name.values()
+    ]
+    content = "\n\n".join(
+        f"## {section['section']}\n\n{section['text']}".strip()
+        for section in sections
+    )
+    return {
+        "paper_id": paper.id,
+        "title": paper.title,
+        "sections": sections,
+        "content": content,
     }
 
 
@@ -145,6 +194,53 @@ async def list_papers(
     return result
 
 
+@router.get("/{paper_id:path}/chunks")
+async def get_paper_chunks(
+    paper_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """获取论文的文本块"""
+    paper_repo = PaperRepository(db)
+    paper = paper_repo.get_visible(paper_id, user.id)
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    # 全文访问校验：只有当前用户解析/上传/共享过的论文才能查看 chunks
+    user_paper_repo = UserPaperRepository(db, user.id)
+    if not _can_view_paper_text(paper, user, user_paper_repo):
+        raise HTTPException(status_code=403, detail="You do not have access to this paper's chunks")
+
+    chunks = _get_ordered_chunks(db, paper_id)
+    return [
+        {"id": c.id, "section": c.section, "ordinal": c.ordinal, "text": c.text}
+        for c in chunks
+    ]
+
+
+@router.get("/{paper_id:path}/fulltext", response_model=PaperFullTextOut)
+async def get_paper_fulltext(
+    paper_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """获取已解析论文的完整文本，按 section 聚合 chunks。"""
+    paper_repo = PaperRepository(db)
+    paper = paper_repo.get_visible(paper_id, user.id)
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    user_paper_repo = UserPaperRepository(db, user.id)
+    if not _can_view_paper_text(paper, user, user_paper_repo):
+        raise HTTPException(status_code=403, detail="You do not have access to this paper's full text")
+
+    chunks = _get_ordered_chunks(db, paper_id)
+    if not chunks:
+        raise HTTPException(status_code=404, detail="Full text not available")
+
+    return _chunks_to_fulltext(paper, chunks)
+
+
 @router.get("/{paper_id:path}", response_model=PaperOut)
 async def get_paper(
     paper_id: str,
@@ -161,37 +257,3 @@ async def get_paper(
 
     is_parsed = user_paper_repo.has_fulltext_access(paper_id)
     return _paper_to_out(paper, is_parsed)
-
-
-@router.get("/{paper_id:path}/chunks")
-async def get_paper_chunks(
-    paper_id: str,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """获取论文的文本块"""
-    paper_repo = PaperRepository(db)
-    paper = paper_repo.get_visible(paper_id, user.id)
-    if not paper:
-        raise HTTPException(status_code=404, detail="Paper not found")
-
-    # 所有权校验：public 论文或拥有该 private 论文的用户才能查看 chunks
-    user_paper_repo = UserPaperRepository(db, user.id)
-    is_owner = (
-        paper.visibility == "public"
-        or paper.created_by_user_id == user.id
-        or user_paper_repo.has_parsed(paper_id)
-    )
-    if not is_owner:
-        raise HTTPException(status_code=403, detail="You do not have access to this paper's chunks")
-
-    chunks = (
-        db.query(Chunk)
-        .filter(Chunk.paper_id == paper_id)
-        .order_by(Chunk.ordinal)
-        .all()
-    )
-    return [
-        {"id": c.id, "section": c.section, "ordinal": c.ordinal, "text": c.text}
-        for c in chunks
-    ]

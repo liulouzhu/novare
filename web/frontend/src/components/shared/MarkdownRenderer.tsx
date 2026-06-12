@@ -13,6 +13,8 @@ interface Props {
 }
 
 export function MarkdownRenderer({ content }: Props) {
+  const normalizedContent = normalizeHtmlTables(content)
+
   return (
     <ReactMarkdown
       remarkPlugins={[remarkMath, remarkGfm]}
@@ -78,9 +80,56 @@ export function MarkdownRenderer({ content }: Props) {
         ),
       }}
     >
-      {content}
+      {normalizedContent}
     </ReactMarkdown>
   )
+}
+
+function normalizeHtmlTables(content: string): string {
+  if (typeof DOMParser === 'undefined' || !content.includes('<table')) {
+    return content
+  }
+  return content.replace(/<table[\s\S]*?<\/table>/gi, (tableHtml) => {
+    const markdownTable = htmlTableToMarkdown(tableHtml)
+    return markdownTable || tableHtml
+  })
+}
+
+function htmlTableToMarkdown(tableHtml: string): string | null {
+  const parser = new DOMParser()
+  const doc = parser.parseFromString(tableHtml, 'text/html')
+  const rows = Array.from(doc.querySelectorAll('tr'))
+    .map((row) =>
+      Array.from(row.children)
+        .filter((cell) => ['TD', 'TH'].includes(cell.tagName))
+        .map((cell) => escapeTableCell(cell.textContent || '')),
+    )
+    .filter((row) => row.length > 0)
+
+  if (rows.length === 0) return null
+
+  const columnCount = Math.max(...rows.map((row) => row.length))
+  const paddedRows = rows.map((row) => [
+    ...row,
+    ...Array.from({ length: columnCount - row.length }, () => ''),
+  ])
+  const header = paddedRows[0]
+  const body = paddedRows.slice(1)
+
+  return [
+    '',
+    `| ${header.join(' | ')} |`,
+    `| ${header.map(() => '---').join(' | ')} |`,
+    ...body.map((row) => `| ${row.join(' | ')} |`),
+    '',
+  ].join('\n')
+}
+
+function escapeTableCell(value: string): string {
+  return value
+    .replace(/\s+/g, ' ')
+    .replace(/\|/g, '\\|')
+    .trim()
 }
 
 function CopyButton() {

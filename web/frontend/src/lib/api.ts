@@ -51,6 +51,19 @@ export interface Paper {
   created_at: string | null
 }
 
+export interface PaperFullTextSection {
+  section: string
+  text: string
+  chunk_count: number
+}
+
+export interface PaperFullText {
+  paper_id: string
+  title: string
+  sections: PaperFullTextSection[]
+  content: string
+}
+
 // ── Auth ──
 
 export async function register(username: string, email: string, password: string) {
@@ -145,6 +158,12 @@ export async function fetchPapers(params?: { q?: string; is_parsed?: boolean }):
 export async function fetchPaper(paperId: string): Promise<Paper> {
   const res = await fetch(`${BASE}/api/papers/${encodeURIComponent(paperId)}`, { headers: authHeaders() })
   if (!res.ok) { handleAuthError(res); throw new Error('Failed to fetch paper') }
+  return res.json()
+}
+
+export async function fetchPaperFullText(paperId: string): Promise<PaperFullText> {
+  const res = await fetch(`${BASE}/api/papers/${encodeURIComponent(paperId)}/fulltext`, { headers: authHeaders() })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to fetch paper full text') }
   return res.json()
 }
 

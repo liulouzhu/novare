@@ -60,6 +60,19 @@ class PaperOut(BaseModel):
     created_at: str | None = None
 
 
+class PaperFullTextSection(BaseModel):
+    section: str
+    text: str
+    chunk_count: int = 0
+
+
+class PaperFullTextOut(BaseModel):
+    paper_id: str
+    title: str
+    sections: list[PaperFullTextSection] = Field(default_factory=list)
+    content: str = ""
+
+
 class UploadResponse(BaseModel):
     filename: str
     file_path: str

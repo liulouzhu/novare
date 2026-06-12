@@ -1,9 +1,10 @@
 /** 论文库页面 */
 
-import { useState, useEffect } from 'react'
-import { type Paper, fetchPapers } from '@/lib/api'
-import { Search, FileText, ExternalLink, Loader2, Filter, RefreshCw } from 'lucide-react'
+import { useState, useEffect, useRef, type CSSProperties, type FormEvent } from 'react'
+import { type Paper, type PaperFullText, fetchPaperFullText, fetchPapers } from '@/lib/api'
+import { Search, FileText, ExternalLink, Loader2, RefreshCw, BookOpen, X, AlertCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { MarkdownRenderer } from '@/components/shared/MarkdownRenderer'
 
 export function PaperLibraryPage() {
   const [papers, setPapers] = useState<Paper[]>([])
@@ -11,6 +12,11 @@ export function PaperLibraryPage() {
   const [searchQuery, setSearchQuery] = useState('')
   const [filter, setFilter] = useState<'all' | 'parsed' | 'unparsed'>('all')
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [readerPaper, setReaderPaper] = useState<Paper | null>(null)
+  const [readerData, setReaderData] = useState<PaperFullText | null>(null)
+  const [readerLoading, setReaderLoading] = useState(false)
+  const [readerError, setReaderError] = useState<string | null>(null)
+  const readerRequestId = useRef(0)
 
   const loadPapers = async () => {
     setLoading(true)
@@ -28,7 +34,7 @@ export function PaperLibraryPage() {
     loadPapers()
   }, [])
 
-  const handleSearch = (e: React.FormEvent) => {
+  const handleSearch = (e: FormEvent) => {
     e.preventDefault()
     loadPapers()
   }
@@ -38,6 +44,37 @@ export function PaperLibraryPage() {
     if (filter === 'unparsed') return !p.is_parsed
     return true
   })
+
+  const openReader = async (paper: Paper) => {
+    const requestId = readerRequestId.current + 1
+    readerRequestId.current = requestId
+    setReaderPaper(paper)
+    setExpandedId(null)
+    setReaderData(null)
+    setReaderError(null)
+    setReaderLoading(true)
+    try {
+      const data = await fetchPaperFullText(paper.id)
+      if (requestId !== readerRequestId.current) return
+      setReaderData(data)
+    } catch (e) {
+      if (requestId !== readerRequestId.current) return
+      console.error('Failed to load paper full text:', e)
+      setReaderError('全文暂时无法加载，可能还没有可读取的解析文本。')
+    } finally {
+      if (requestId === readerRequestId.current) {
+        setReaderLoading(false)
+      }
+    }
+  }
+
+  const handlePaperClick = (paper: Paper) => {
+    if (paper.is_parsed) {
+      void openReader(paper)
+      return
+    }
+    setExpandedId(expandedId === paper.id ? null : paper.id)
+  }
 
   return (
     <div className="flex flex-col h-full" style={{ backgroundColor: 'var(--bg-primary)' }}>
@@ -98,30 +135,37 @@ export function PaperLibraryPage() {
         </div>
       </div>
 
-      {/* 论文列表 */}
-      <div className="flex-1 overflow-y-auto px-6 py-4">
-        {loading ? (
-          <div className="flex items-center justify-center py-20">
-            <Loader2 size={20} className="animate-spin" style={{ color: 'var(--text-tertiary)' }} />
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="text-center py-20" style={{ color: 'var(--text-tertiary)' }}>
-            <FileText size={40} className="mx-auto mb-3 opacity-30" />
-            <div className="text-sm">暂无论文</div>
-            <div className="text-xs mt-1">使用对话中的 paper_search 工具检索论文</div>
-          </div>
-        ) : (
-          <div className="space-y-2 max-w-4xl mx-auto">
-            <div className="text-xs mb-3" style={{ color: 'var(--text-tertiary)' }}>
-              共 {filtered.length} 篇论文
+      <div className="flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden">
+        {/* 论文列表 */}
+        <div className="flex-1 min-w-0 overflow-y-auto px-6 py-4">
+          {loading ? (
+            <div className="flex items-center justify-center py-20">
+              <Loader2 size={20} className="animate-spin" style={{ color: 'var(--text-tertiary)' }} />
             </div>
-            {filtered.map((paper) => (
-              <div
-                key={paper.id}
-                className="border rounded-lg p-4 cursor-pointer transition-colors hover:bg-gray-50 dark:hover:bg-gray-800/50"
-                style={{ borderColor: 'var(--border-color)' }}
-                onClick={() => setExpandedId(expandedId === paper.id ? null : paper.id)}
-              >
+          ) : filtered.length === 0 ? (
+            <div className="text-center py-20" style={{ color: 'var(--text-tertiary)' }}>
+              <FileText size={40} className="mx-auto mb-3 opacity-30" />
+              <div className="text-sm">暂无论文</div>
+              <div className="text-xs mt-1">使用对话中的 paper_search 工具检索论文</div>
+            </div>
+          ) : (
+            <div className="space-y-2 max-w-4xl mx-auto">
+              <div className="text-xs mb-3" style={{ color: 'var(--text-tertiary)' }}>
+                共 {filtered.length} 篇论文
+              </div>
+              {filtered.map((paper) => (
+                <div
+                  key={paper.id}
+                  className={cn(
+                    'border rounded-lg p-4 cursor-pointer transition-colors hover:bg-gray-50 dark:hover:bg-gray-800/50',
+                    readerPaper?.id === paper.id ? 'ring-1' : '',
+                  )}
+                  style={{
+                    borderColor: readerPaper?.id === paper.id ? 'var(--accent)' : 'var(--border-color)',
+                    '--tw-ring-color': 'var(--accent)',
+                  } as CSSProperties}
+                  onClick={() => handlePaperClick(paper)}
+                >
                 <div className="flex items-start gap-3">
                   <div
                     className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
@@ -155,23 +199,18 @@ export function PaperLibraryPage() {
                     </div>
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
-                    {(paper.pdf_path || paper.url) && (
-                      <a
-                        href={`/api/papers/pdf/view?paper_id=${encodeURIComponent(paper.id)}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
+                    {paper.is_parsed && (
+                      <button
+                        type="button"
                         className="p-1.5 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
-                        onClick={(e) => e.stopPropagation()}
-                        title="查看 PDF"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          void openReader(paper)
+                        }}
+                        title="阅读全文"
                       >
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--accent)' }}>
-                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                          <polyline points="14 2 14 8 20 8" />
-                          <line x1="16" y1="13" x2="8" y2="13" />
-                          <line x1="16" y1="17" x2="8" y2="17" />
-                          <polyline points="10 9 9 9 8 9" />
-                        </svg>
-                      </a>
+                        <BookOpen size={14} style={{ color: 'var(--accent)' }} />
+                      </button>
                     )}
                     {paper.url && (
                       <a
@@ -196,13 +235,68 @@ export function PaperLibraryPage() {
                     </div>
                     <div className="mt-2 flex items-center gap-4 text-xs" style={{ color: 'var(--text-tertiary)' }}>
                       <span>ID: {paper.id}</span>
-                      {paper.pdf_path && <span>PDF: {paper.pdf_path.split('/').pop()}</span>}
                     </div>
                   </div>
                 )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {readerPaper && (
+          <aside
+            className="w-full md:w-[460px] lg:w-[540px] min-h-[320px] md:h-full border-t md:border-t-0 md:border-l flex flex-col"
+            style={{ borderColor: 'var(--border-color)', backgroundColor: 'var(--bg-secondary)' }}
+          >
+            <div className="px-4 py-3 border-b shrink-0" style={{ borderColor: 'var(--border-color)' }}>
+              <div className="flex items-start gap-3">
+                <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{ backgroundColor: 'var(--accent-light)' }}>
+                  <BookOpen size={15} style={{ color: 'var(--accent)' }} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium leading-snug line-clamp-2" style={{ color: 'var(--text-primary)' }}>
+                    {readerPaper.title}
+                  </div>
+                  <div className="text-xs mt-1 truncate" style={{ color: 'var(--text-tertiary)' }}>
+                    {readerPaper.authors.slice(0, 3).join(', ')}
+                    {readerPaper.authors.length > 3 && ' et al.'}
+                    {readerPaper.year && ` · ${readerPaper.year}`}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    readerRequestId.current += 1
+                    setReaderPaper(null)
+                    setReaderData(null)
+                    setReaderError(null)
+                  }}
+                  className="p-1.5 rounded-md hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors shrink-0"
+                  title="关闭"
+                >
+                  <X size={16} style={{ color: 'var(--text-secondary)' }} />
+                </button>
               </div>
-            ))}
-          </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-5 py-4">
+              {readerLoading ? (
+                <div className="flex items-center justify-center py-16">
+                  <Loader2 size={20} className="animate-spin" style={{ color: 'var(--text-tertiary)' }} />
+                </div>
+              ) : readerError ? (
+                <div className="flex items-start gap-2 text-sm rounded-md border p-3" style={{ borderColor: 'var(--border-color)', color: 'var(--text-secondary)' }}>
+                  <AlertCircle size={16} className="mt-0.5 shrink-0" style={{ color: 'var(--warning)' }} />
+                  <span>{readerError}</span>
+                </div>
+              ) : readerData ? (
+                <div className="text-sm leading-7" style={{ color: 'var(--text-secondary)' }}>
+                  <MarkdownRenderer content={readerData.content} />
+                </div>
+              ) : null}
+            </div>
+          </aside>
         )}
       </div>
     </div>
