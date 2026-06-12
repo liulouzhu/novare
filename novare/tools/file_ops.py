@@ -8,12 +8,37 @@ import re
 from pathlib import Path
 
 
+def _resolve_workspace_path(raw_path: str | Path, workspace: Path) -> Path:
+    """将用户传入的路径解析为 workspace 内的绝对路径，拒绝逃逸。
+
+    - 相对路径：基于 workspace 解析
+    - 绝对路径：必须在 workspace 内
+    - .. 逃逸和符号链接逃逸均被拒绝
+    """
+    workspace_root = workspace.resolve()
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        candidate = workspace_root / candidate
+    resolved = candidate.resolve()
+    if resolved == workspace_root:
+        return resolved
+    # workspace_root 必须是 resolved 的祖先
+    try:
+        resolved.relative_to(workspace_root)
+    except ValueError:
+        raise ValueError(f"Path outside workspace: {raw_path}")
+    return resolved
+
+
 async def handle_read_file(args: dict, workspace: Path = Path(".")) -> str:
-    path = Path(args["path"])
+    try:
+        path = _resolve_workspace_path(args["path"], workspace)
+    except ValueError as e:
+        return f"Error: {e}"
     if not path.exists():
-        return f"Error: File not found: {path}"
+        return f"Error: File not found: {args['path']}"
     if path.is_dir():
-        return f"Error: Is a directory: {path}"
+        return f"Error: Is a directory: {args['path']}"
     try:
         content = path.read_text(encoding="utf-8")
         return content
@@ -22,7 +47,10 @@ async def handle_read_file(args: dict, workspace: Path = Path(".")) -> str:
 
 
 async def handle_write_file(args: dict, workspace: Path = Path(".")) -> str:
-    path = Path(args["path"])
+    try:
+        path = _resolve_workspace_path(args["path"], workspace)
+    except ValueError as e:
+        return f"Error: {e}"
     content = args["content"]
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -33,12 +61,15 @@ async def handle_write_file(args: dict, workspace: Path = Path(".")) -> str:
 
 
 async def handle_edit_file(args: dict, workspace: Path = Path(".")) -> str:
-    path = Path(args["path"])
+    try:
+        path = _resolve_workspace_path(args["path"], workspace)
+    except ValueError as e:
+        return f"Error: {e}"
     old_string = args["old_string"]
     new_string = args["new_string"]
 
     if not path.exists():
-        return f"Error: File not found: {path}"
+        return f"Error: File not found: {args['path']}"
 
     try:
         content = path.read_text(encoding="utf-8")
@@ -46,7 +77,7 @@ async def handle_edit_file(args: dict, workspace: Path = Path(".")) -> str:
         return f"Error reading file: {e}"
 
     if old_string not in content:
-        return f"Error: old_string not found in {path}"
+        return f"Error: old_string not found in {args['path']}"
 
     count = content.count(old_string)
     new_content = content.replace(old_string, new_string, 1)
@@ -54,17 +85,20 @@ async def handle_edit_file(args: dict, workspace: Path = Path(".")) -> str:
     try:
         path.write_text(new_content, encoding="utf-8")
         extra = f" ({count - 1} remaining)" if count > 1 else ""
-        return f"OK: Replaced old_string in {path}{extra}"
+        return f"OK: Replaced old_string in {args['path']}{extra}"
     except Exception as e:
         return f"Error writing file: {e}"
 
 
 async def handle_glob_search(args: dict, workspace: Path = Path(".")) -> str:
     pattern = args["pattern"]
-    search_path = Path(args.get("path", str(workspace)))
+    try:
+        search_path = _resolve_workspace_path(args.get("path", "."), workspace)
+    except ValueError as e:
+        return f"Error: {e}"
 
     if not search_path.exists():
-        return f"Error: Path not found: {search_path}"
+        return f"Error: Path not found: {args.get('path', '.')}"
 
     matches = []
     for root, dirs, files in os.walk(search_path):
@@ -84,11 +118,14 @@ async def handle_glob_search(args: dict, workspace: Path = Path(".")) -> str:
 
 async def handle_grep_search(args: dict, workspace: Path = Path(".")) -> str:
     pattern = args["pattern"]
-    search_path = Path(args.get("path", str(workspace)))
+    try:
+        search_path = _resolve_workspace_path(args.get("path", "."), workspace)
+    except ValueError as e:
+        return f"Error: {e}"
     glob_filter = args.get("glob", None)
 
     if not search_path.exists():
-        return f"Error: Path not found: {search_path}"
+        return f"Error: Path not found: {args.get('path', '.')}"
 
     try:
         regex = re.compile(pattern, re.IGNORECASE)
@@ -103,7 +140,8 @@ async def handle_grep_search(args: dict, workspace: Path = Path(".")) -> str:
                 continue
             full = os.path.join(root, f)
             try:
-                text = open(full, "r", encoding="utf-8", errors="ignore").read()
+                with open(full, "r", encoding="utf-8", errors="ignore") as fh:
+                    text = fh.read()
                 for i, line in enumerate(text.splitlines(), 1):
                     if regex.search(line):
                         rel = os.path.relpath(full, search_path)

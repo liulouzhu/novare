@@ -37,7 +37,11 @@ async def handle_reviewer_evaluate(args: dict, **kwargs) -> str:
         stage: 评审阶段 ("candidates" | "review")
         executor_review: 执行者的评审结果（stage="review" 时提供）
     """
-    reviewer_llm: LLMClient | None = kwargs.get("tool_context", {}).get("reviewer_llm")
+    # registry.execute 用 kwargs.update(tool_context) 解包，reviewer_llm 在顶层；
+    # 兼容旧格式 kwargs["tool_context"]["reviewer_llm"]
+    reviewer_llm: LLMClient | None = kwargs.get("reviewer_llm")
+    if reviewer_llm is None:
+        reviewer_llm = kwargs.get("tool_context", {}).get("reviewer_llm")
     if not reviewer_llm:
         return json.dumps({
             "error": "评审模型未配置。请设置环境变量 NOVARE_REVIEWER_API_KEY、NOVARE_REVIEWER_BASE_URL、NOVARE_REVIEWER_MODEL。",
