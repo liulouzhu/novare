@@ -9,14 +9,17 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
 # 项目根目录
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# 在 import 业务模块前加载 .env，确保 DATABASE_URL 等变量可用
+from dotenv import load_dotenv  # noqa: E402
+load_dotenv(PROJECT_ROOT / ".env")
+
+from fastapi import FastAPI  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from web.backend.agent_service import AgentService  # noqa: E402
 from web.backend.db.base import Base, engine  # noqa: E402
 from web.backend.sandbox.manager import (  # noqa: E402

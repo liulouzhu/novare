@@ -115,6 +115,7 @@ class LLMClient:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self._closed = False
         self._http = httpx.AsyncClient(
             base_url=self.base_url,
             headers={
@@ -125,6 +126,18 @@ class LLMClient:
             timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0),
         )
 
+    async def __aenter__(self) -> LLMClient:
+        if self._closed:
+            raise RuntimeError("LLMClient is closed")
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.close()
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("LLMClient is closed")
+
     async def chat(
         self,
         messages: list[dict],
@@ -132,6 +145,7 @@ class LLMClient:
         max_tokens: int = 4096,
     ) -> LLMResponse:
         """非流式调用"""
+        self._ensure_open()
         body = self._build_body(messages, tools, max_tokens, stream=False)
         resp = await self._http.post("/chat/completions", json=body)
         resp.raise_for_status()
@@ -144,6 +158,7 @@ class LLMClient:
         max_tokens: int = 4096,
     ) -> AsyncIterator[StreamChunk]:
         """流式调用，逐 chunk yield"""
+        self._ensure_open()
         body = self._build_body(messages, tools, max_tokens, stream=True)
         logger.debug("LLM stream request: model=%s, messages=%d, tools=%d",
                       self.model, len(messages), len(tools or []))
@@ -238,4 +253,7 @@ class LLMClient:
         return body
 
     async def close(self):
+        if self._closed:
+            return
+        self._closed = True
         await self._http.aclose()
