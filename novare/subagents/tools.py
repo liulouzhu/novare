@@ -251,20 +251,7 @@ def register_subagent_tools(
         source="builtin:context",
     ))
 
-    # 将共享上下文存储到 tool_registry 上，供 execute() 使用
-    # 这利用了 ToolRegistry.execute() 中 tool_context 的传递机制
-    tool_registry._subagent_context = shared_context
-
-    # 覆盖 execute 方法以自动注入子智能体上下文
-    _original_execute = tool_registry.execute
-
-    async def _execute_with_context(name: str, arguments: dict, tool_context: dict | None = None) -> str:
-        """增强的 execute：对子智能体工具自动注入共享上下文"""
-        merged = dict(shared_context)
-        if tool_context:
-            merged.update(tool_context)
-        return await _original_execute(name, arguments, tool_context=merged)
-
-    tool_registry.execute = _execute_with_context  # type: ignore[assignment]
+    # 将共享上下文存储到 tool_registry，供 execute() 自动注入到 builtin:context 工具
+    tool_registry.set_default_tool_context(shared_context)
 
     logger.info("Subagent tools registered (spawn, check, list)")

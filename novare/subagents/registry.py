@@ -32,13 +32,19 @@ class SubagentRegistry:
     存储 SubagentRecord 的内存字典，管理生命周期状态转换。
     """
 
-    def __init__(self):
+    def __init__(self, max_records: int = 1000, cleanup_age_seconds: float = 3600):
         self._records: dict[str, SubagentRecord] = {}
+        self.max_records = max_records
+        self.cleanup_age_seconds = cleanup_age_seconds
 
     # ── 创建 ────────────────────────────────────────────────────
 
     def create(self, subagent_type: SubagentType, task: str) -> SubagentRecord:
         """创建新子智能体记录（PENDING 状态）"""
+        # 自动清理过期记录并强制容量上限
+        self.cleanup_finished(self.cleanup_age_seconds)
+        self._enforce_max_records()
+
         sid = _make_subagent_id()
         record = SubagentRecord(
             subagent_id=sid,
@@ -162,6 +168,32 @@ class SubagentRegistry:
         if to_remove:
             logger.info("Cleaned up %d finished subagent records", len(to_remove))
         return len(to_remove)
+
+    def _enforce_max_records(self) -> None:
+        """当记录数超过 max_records 时，优先删除最老的已完成记录。"""
+        if len(self._records) < self.max_records:
+            return
+
+        # 按完成时间（或创建时间）排序的 finished 记录
+        _FINISHED = (SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.CANCELLED)
+        finished = [
+            (sid, r) for sid, r in self._records.items()
+            if r.status in _FINISHED
+        ]
+        if not finished:
+            logger.warning(
+                "SubagentRegistry at max_records=%d but no finished records to evict "
+                "(all %d are active)", self.max_records, len(self._records),
+            )
+            return
+
+        # 按 finished_at 或 created_at 升序，最老的排前面
+        finished.sort(key=lambda item: item[1].finished_at or item[1].created_at)
+        # 删除到 max_records 以下
+        to_evict = len(self._records) - self.max_records + 1
+        for sid, _ in finished[:to_evict]:
+            del self._records[sid]
+        logger.info("Evicted %d oldest finished subagent records (max_records=%d)", to_evict, self.max_records)
 
     async def cancel_all(self) -> int:
         """取消所有活跃的子智能体（用于进程退出时清理）"""

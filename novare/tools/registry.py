@@ -147,6 +147,7 @@ class ToolRegistry:
     def __init__(self, workspace: Path = Path(".")):
         self.workspace = workspace
         self._tools: dict[str, ToolDef] = {}
+        self._default_tool_context: dict = {}
         self._register_builtins()
 
     def _register_builtins(self):
@@ -164,6 +165,13 @@ class ToolRegistry:
     def register_tool(self, tool: ToolDef):
         self._tools[tool.name] = tool
         logger.info("Registered tool: %s (source=%s)", tool.name, tool.source)
+
+    def set_default_tool_context(self, context: dict | None) -> None:
+        """设置默认的工具上下文，对 builtin:context 和 mcp 工具自动注入。
+
+        调用时传入的 tool_context 优先级更高（会覆盖默认值）。
+        """
+        self._default_tool_context = dict(context or {})
 
     def list_tools(self) -> list[ToolDef]:
         return list(self._tools.values())
@@ -183,8 +191,11 @@ class ToolRegistry:
             kwargs = {"workspace": self.workspace}
             # MCP 工具和需要上下文的内置工具（如 reviewer_evaluate）传递 tool_context
             needs_context = tool.source.startswith("mcp:") or tool.source == "builtin:context"
-            if needs_context and tool_context:
-                kwargs.update(tool_context)
+            if needs_context:
+                merged_context = dict(self._default_tool_context)
+                if tool_context:
+                    merged_context.update(tool_context)
+                kwargs.update(merged_context)
             result = await tool.handler(arguments, **kwargs)
             return result
         except Exception as e:

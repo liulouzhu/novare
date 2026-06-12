@@ -138,3 +138,119 @@ class TestReviewerEvaluate:
         }
         result = await handle_reviewer_evaluate(args)
         assert "评审模型未配置" in result
+
+
+class TestDefaultToolContext:
+    """C1: set_default_tool_context 替代 monkey patch"""
+
+    def test_set_default_tool_context_stores_dict(self, tmp_workspace):
+        """set_default_tool_context 存储上下文。"""
+        registry = ToolRegistry(workspace=tmp_workspace)
+        ctx = {"foo": "bar"}
+        registry.set_default_tool_context(ctx)
+        assert registry._default_tool_context == {"foo": "bar"}
+        # 修改原 dict 不影响已存储的副本
+        ctx["baz"] = 1
+        assert "baz" not in registry._default_tool_context
+
+    def test_set_default_tool_context_none_clears(self, tmp_workspace):
+        """传 None 清空默认上下文。"""
+        registry = ToolRegistry(workspace=tmp_workspace)
+        registry.set_default_tool_context({"a": 1})
+        registry.set_default_tool_context(None)
+        assert registry._default_tool_context == {}
+
+    @pytest.mark.asyncio
+    async def test_execute_merges_default_and_call_context(self, tmp_workspace):
+        """execute 合并默认上下文和调用时上下文，调用时优先。"""
+        registry = ToolRegistry(workspace=tmp_workspace)
+        captured_kwargs = {}
+
+        async def spy_handler(args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return "ok"
+
+        registry.register_tool(ToolDef(
+            name="spy_tool",
+            description="spy",
+            parameters={"type": "object", "properties": {}},
+            handler=spy_handler,
+            source="builtin:context",
+        ))
+
+        registry.set_default_tool_context({"alpha": 1, "beta": 2})
+        await registry.execute("spy_tool", {}, tool_context={"beta": 99, "gamma": 3})
+
+        assert captured_kwargs["alpha"] == 1
+        assert captured_kwargs["beta"] == 99   # 调用时覆盖默认
+        assert captured_kwargs["gamma"] == 3
+        assert captured_kwargs["workspace"] == tmp_workspace
+
+    @pytest.mark.asyncio
+    async def test_execute_no_context_for_plain_builtin(self, tmp_workspace):
+        """普通 builtin 工具不注入默认上下文。"""
+        registry = ToolRegistry(workspace=tmp_workspace)
+        captured_kwargs = {}
+
+        async def spy_handler(args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return "ok"
+
+        registry.register_tool(ToolDef(
+            name="spy_plain",
+            description="spy",
+            parameters={"type": "object", "properties": {}},
+            handler=spy_handler,
+            source="builtin",  # 普通 builtin，不是 builtin:context
+        ))
+
+        registry.set_default_tool_context({"secret": "value"})
+        await registry.execute("spy_plain", {})
+
+        assert "secret" not in captured_kwargs
+        assert captured_kwargs["workspace"] == tmp_workspace
+
+    @pytest.mark.asyncio
+    async def test_reviewer_evaluate_gets_default_context(self, tmp_workspace):
+        """reviewer_evaluate 通过默认上下文也能拿到 reviewer_llm。"""
+        registry = ToolRegistry(workspace=tmp_workspace)
+        fake_llm = _make_fake_reviewer_llm()
+
+        # 只设默认上下文，不传 tool_context
+        registry.set_default_tool_context({"reviewer_llm": fake_llm})
+
+        args = {
+            "topic": "test",
+            "stage": "candidates",
+            "candidates": [{"title": "t", "problem": "p", "idea": "i"}],
+        }
+        result = await registry.execute("reviewer_evaluate", args)
+        fake_llm.collect_stream.assert_awaited_once()
+        assert "评审模型未配置" not in result
+
+    def test_register_subagent_tools_no_monkey_patch(self, tmp_workspace, monkeypatch):
+        """register_subagent_tools 后 execute 仍是原方法（非 monkey patch）。"""
+        # 导入链需要 DATABASE_URL（session.py → db → base.py）
+        monkeypatch.setenv("DATABASE_URL", "postgresql://test:test@localhost:5432/test")
+        from novare.subagents.registry import SubagentRegistry
+        from novare.subagents.tools import register_subagent_tools
+        from unittest.mock import MagicMock
+
+        registry = ToolRegistry(workspace=tmp_workspace)
+        # 记录原始的底层函数
+        original_func = registry.execute.__func__
+
+        sub_reg = SubagentRegistry()
+        fake_llm = MagicMock()
+        register_subagent_tools(
+            tool_registry=registry,
+            subagent_registry=sub_reg,
+            llm_client=fake_llm,
+            system_prompt="test",
+            workspace=tmp_workspace,
+        )
+
+        # execute 的底层函数不应改变（不是闭包替换）
+        assert registry.execute.__func__ is original_func
+        # 默认上下文已被设置
+        assert registry._default_tool_context.get("subagent_registry") is sub_reg
