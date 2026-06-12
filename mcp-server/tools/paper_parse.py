@@ -3,6 +3,7 @@
 import logging
 import os
 import tempfile
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -43,6 +44,109 @@ def _user_papers_dir(user_id: str) -> str:
     """用户私有 PDF 目录（用户上传的论文）。"""
     from novare.config import get_user_workspace
     return os.path.join(get_user_workspace(user_id), "papers")
+
+
+def _resolve_user_workspace(user_id: str) -> Path:
+    """返回用户 workspace 的 resolved Path。"""
+    from novare.config import get_user_workspace
+    return Path(get_user_workspace(user_id)).resolve()
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    """判断 path 是否在 root 之下（兼容 Python <3.9）。"""
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_user_local_file(file_path: str, user_id: str | None) -> str:
+    """校验本地文件路径属于当前用户的允许目录。
+
+    返回 resolved 路径字符串。
+    Raises:
+        PermissionError — 无权限或缺少 user context
+        FileNotFoundError — 文件不存在
+    """
+    resolved = Path(file_path).resolve()
+
+    if not user_id:
+        if os.getenv("ALLOW_UNSCOPED_LOCAL_FILE_PARSE", "").lower() not in ("1", "true", "yes"):
+            raise PermissionError("缺少用户上下文，无法解析本地文件。请在 Web 模式下使用。")
+        if not resolved.is_file():
+            raise FileNotFoundError(f"文件不存在: {file_path}")
+        return str(resolved)
+
+    user_root = _resolve_user_workspace(user_id)
+    allowed_roots = [
+        (user_root / "uploads").resolve(),
+        (user_root / "papers").resolve(),
+    ]
+
+    if not any(_is_relative_to(resolved, root) for root in allowed_roots):
+        raise PermissionError("文件路径不在您的允许目录内，无法访问。")
+
+    if not resolved.is_file():
+        raise FileNotFoundError(f"文件不存在: {file_path}")
+
+    return str(resolved)
+
+
+def _user_has_fulltext_access(user_id: str, paper_id: str) -> bool:
+    """查询用户是否对指定论文有全文访问权限。"""
+    try:
+        from web.backend.db.base import SessionLocal
+        from web.backend.db.models import UserPaper
+        from uuid import UUID
+        db = SessionLocal()
+        try:
+            return db.query(UserPaper).filter(
+                UserPaper.user_id == UUID(user_id),
+                UserPaper.paper_id == paper_id,
+                UserPaper.has_fulltext_access.is_(True),
+            ).first() is not None
+        finally:
+            db.close()
+    except Exception:
+        return False
+
+
+def _can_reuse_paper_pdf(paper: dict, user_id: str | None) -> bool:
+    """判断当前用户是否可以复用已有 paper 的 pdf_path。
+
+    - public paper + pdf_path 在公共缓存目录 → 允许
+    - public paper + pdf_path 在用户目录 → 需要权限
+    - private paper → 仅 owner 或 has_fulltext_access
+    - 无 pdf_path → False
+    """
+    pdf_path = paper.get("pdf_path")
+    if not pdf_path:
+        return False
+
+    visibility = paper.get("visibility", "public")
+    creator = str(paper.get("created_by_user_id") or "")
+    paper_id = paper["id"]
+
+    if visibility == "private":
+        if not user_id:
+            return False
+        if creator and creator == str(user_id):
+            return True
+        return _user_has_fulltext_access(user_id, paper_id)
+
+    # public paper
+    public_dir = Path(_public_papers_dir()).resolve()
+    pdf_resolved = Path(pdf_path).resolve()
+    if _is_relative_to(pdf_resolved, public_dir):
+        return True
+
+    # pdf_path 在某个用户目录下 — 需要权限
+    if not user_id:
+        return False
+    if creator and creator == str(user_id):
+        return True
+    return _user_has_fulltext_access(user_id, paper_id)
 
 
 def associate_user_paper(
@@ -138,11 +242,14 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
     resolved_paper_id = paper_id
     is_local_file = False
 
-    # 本地文件（用户上传）→ 存在用户私有目录
+    # 本地文件（用户上传）→ 路径安全校验
     if file_path:
-        if not os.path.exists(file_path):
-            return fail("paper_parse", f"文件不存在: {file_path}")
-        pdf_path = file_path
+        try:
+            pdf_path = _validate_user_local_file(file_path, user_id)
+        except PermissionError as e:
+            return fail("paper_parse", str(e))
+        except FileNotFoundError as e:
+            return fail("paper_parse", str(e))
         is_local_file = True
         if not resolved_paper_id:
             resolved_paper_id = os.path.splitext(os.path.basename(file_path))[0]
@@ -153,7 +260,9 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
             paper = get_paper(conn, paper_id)
             if paper:
                 if paper.get("pdf_path") and os.path.exists(paper["pdf_path"]):
-                    pdf_path = paper["pdf_path"]
+                    if not _can_reuse_paper_pdf(paper, user_id):
+                        return fail("paper_parse", "您无权访问该论文的本地 PDF。")
+                    pdf_path = str(Path(paper["pdf_path"]).resolve())
                 elif paper.get("source") == "arxiv":
                     arxiv_id = paper_id.replace("arxiv:", "")
                     pdf_url = pdf_url or f"https://arxiv.org/pdf/{arxiv_id}"
@@ -181,12 +290,13 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
         if resolved_paper_id:
             existing_chunks = get_chunks_by_paper(conn, resolved_paper_id)
             if existing_chunks:
-                # 可见性校验：private 论文只允许创建者关联
+                # 可见性校验：private 论文需要权限才能关联
                 paper = get_paper(conn, resolved_paper_id)
                 if paper and paper.get("visibility") == "private":
-                    creator = paper.get("created_by_user_id")
-                    if creator and str(creator) != str(user_id):
-                        return fail("paper_parse", f"论文 {resolved_paper_id} 是私有论文，您无权访问。")
+                    creator = str(paper.get("created_by_user_id") or "")
+                    if creator and creator != str(user_id or ""):
+                        if not _user_has_fulltext_access(user_id or "", resolved_paper_id):
+                            return fail("paper_parse", f"论文 {resolved_paper_id} 是私有论文，您无权访问。")
                 associate_user_paper(user_id, resolved_paper_id)
                 return ok(
                     "paper_parse",
@@ -273,10 +383,14 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
                     paper_data["created_by_user_id"] = user_id
                 upsert_paper(conn, paper_data)
             else:
-                # 更新 pdf_path
+                # 更新 pdf_path（private paper 仅 owner 或有权用户可更新）
                 from web.backend.db.models import Paper
                 existing_row = conn.query(Paper).filter(Paper.id == resolved_paper_id).first()
                 if existing_row:
+                    if existing_row.visibility == "private" and existing_row.created_by_user_id:
+                        if str(existing_row.created_by_user_id) != str(user_id or ""):
+                            if not _user_has_fulltext_access(user_id or "", resolved_paper_id):
+                                return fail("paper_parse", "您无权更新该私有论文的 PDF 路径。")
                     existing_row.pdf_path = pdf_path
 
         # 插入分块
