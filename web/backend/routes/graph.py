@@ -44,6 +44,9 @@ async def get_graph(
             "year": n.get("year"),
             "citation_count": n.get("citation_count", 0),
             "description": n.get("description", ""),
+            "canonical_name": n.get("canonical_name", ""),
+            "aliases": n.get("aliases", []),
+            "source_mentions": n.get("source_mentions", []),
         })
 
     # 前端期望 links 中是 type 字段，仓库返回的是 relation
@@ -53,6 +56,14 @@ async def get_graph(
             "source": l.get("source", ""),
             "target": l.get("target", ""),
             "type": l.get("relation", ""),
+            "alternate_relations": l.get("alternate_relations", []),
+            "confidence": l.get("confidence"),
+            "inference": l.get("inference", ""),
+            "shared_tasks": l.get("shared_tasks", []),
+            "shared_datasets": l.get("shared_datasets", []),
+            "shared_methods": l.get("shared_methods", []),
+            "shared_metrics": l.get("shared_metrics", []),
+            "evidence_note": l.get("evidence_note", ""),
         })
 
     return {"nodes": nodes, "links": links}

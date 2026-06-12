@@ -99,6 +99,7 @@ async def main():
         api_key=config.api_key,
         base_url=config.base_url,
         model=config.model,
+        proxy=config.proxy,
     )
 
     # 初始化工具注册表

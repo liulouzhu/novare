@@ -228,6 +228,8 @@ export function KnowledgeGraphPage() {
               {selectedNode.description && <p className="text-xs mb-3 leading-relaxed" style={{ color: 'var(--text-secondary)' }}>{selectedNode.description}</p>}
               <div className="space-y-1.5 text-xs" style={{ color: 'var(--text-tertiary)' }}>
                 <div>ID: <span className="font-mono">{selectedNode.id}</span></div>
+                {selectedNode.canonical_name && <div>规范名: {selectedNode.canonical_name}</div>}
+                {selectedNode.aliases && selectedNode.aliases.length > 0 && <div>别名: {selectedNode.aliases.slice(0, 4).join(', ')}</div>}
                 {selectedNode.year && <div>年份: {selectedNode.year}</div>}
                 {selectedNode.citation_count > 0 && <div>引用: {selectedNode.citation_count}</div>}
               </div>

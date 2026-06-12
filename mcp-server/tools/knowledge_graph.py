@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import hashlib
 from typing import Optional
 
 import httpx
@@ -15,6 +16,7 @@ from tools.result import ok, fail
 logger = logging.getLogger("research-server.knowledge_graph")
 
 KG_PATH = os.path.join(os.environ.get("RESEARCH_DATA_DIR", "./data"), "knowledge_graph.json")
+DEFAULT_KG_USER = "default"
 
 # ── 实体提取词典 ────────────────────────────────────────────────────────────
 # 每个类别：(canonical_name, [alias1, alias2, ...])
@@ -85,6 +87,19 @@ METRICS = [
     ("CIDEr", ["cider score", "cider metric"]),
 ]
 
+RESEARCH_ENTITY_TYPES = {"Method", "Dataset", "Task", "Metric", "Contribution", "Limitation", "Concept", "Unknown"}
+
+RELATION_PRIORITY = {
+    "extends": 100,
+    "improves_metric_on": 90,
+    "compares_with": 80,
+    "cites": 70,
+    "uses_same_dataset": 60,
+    "solves_same_task": 55,
+    "shares_method_family": 50,
+    "related_to": 10,
+}
+
 TASKS = [
     ("Video Anomaly Detection", ["video anomaly detection", "video anomalous", "vad"]),
     ("Anomaly Detection", ["anomaly detection", "anomaly detection", "outlier detection", "abnormal event detection"]),
@@ -107,6 +122,13 @@ TASKS = [
     ("Medical Image Analysis", ["medical image", "medical imaging"]),
 ]
 
+ENTITY_DICTIONARIES = {
+    "Method": METHODS,
+    "Dataset": DATASETS,
+    "Task": TASKS,
+    "Metric": METRICS,
+}
+
 
 def _extract_entities_from_text(text: str) -> list[dict]:
     """从文本中提取实体（方法/数据集/任务/指标），返回 [{name, type}]"""
@@ -127,6 +149,388 @@ def _extract_entities_from_text(text: str) -> list[dict]:
                     break
 
     return found
+
+
+def _normalize_text(value: str) -> str:
+    """用于实体匹配的宽松归一化。"""
+    value = re.sub(r"\([^)]*\)", " ", value or "")
+    value = value.replace("_", " ").replace("-", " ")
+    value = re.sub(r"[^a-z0-9]+", " ", value.lower())
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _slug(value: str) -> str:
+    value = re.sub(r"\([^)]*\)", " ", value or "")
+    slug = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip().lower())
+    slug = re.sub(r"_+", "_", slug).strip("_")
+    if slug:
+        return slug
+    digest = hashlib.sha1((value or "unknown").encode("utf-8")).hexdigest()[:12]
+    return f"entity_{digest}"
+
+
+def _strip_concept_prefix(value: str) -> str:
+    value = (value or "").strip()
+    while value.startswith("concept:"):
+        value = value[len("concept:"):].strip()
+    if re.fullmatch(r"concept_entity_[0-9a-f]{12}", value):
+        value = value[len("concept_"):]
+    return value
+
+
+def _is_internal_id_label(value: str) -> bool:
+    value = (value or "").strip()
+    return value.startswith("concept:") or bool(re.fullmatch(r"(?:concept_)?entity_[0-9a-f]{12}", value))
+
+
+def _aliases_for(canonical_name: str, entity_type: str) -> list[str]:
+    aliases = {canonical_name}
+    for canonical, known_aliases in ENTITY_DICTIONARIES.get(entity_type, []):
+        if _normalize_text(canonical) == _normalize_text(canonical_name):
+            aliases.update(known_aliases)
+            break
+    return sorted(a for a in aliases if a)
+
+
+def _lookup_canonical_entity(name: str, preferred_type: str | None = None) -> tuple[str, str]:
+    """返回 canonical_name 和 canonical_type。
+
+    preferred_type 为 Unknown/Concept 时允许词典推断具体类型。
+    """
+    raw_name = _strip_concept_prefix(name)
+    if not raw_name:
+        return "Unknown", preferred_type or "Unknown"
+
+    candidates = []
+    if preferred_type in ENTITY_DICTIONARIES:
+        candidates.append(preferred_type)
+    candidates.extend(t for t in ("Method", "Dataset", "Task", "Metric") if t not in candidates)
+
+    normalized = _normalize_text(raw_name)
+    compact = normalized.replace(" ", "")
+    for entity_type in candidates:
+        for canonical, aliases in ENTITY_DICTIONARIES[entity_type]:
+            known = {canonical, *aliases}
+            normalized_known = {_normalize_text(v) for v in known}
+            compact_known = {v.replace(" ", "") for v in normalized_known}
+            if normalized in normalized_known or compact in compact_known:
+                return canonical, entity_type
+
+    if preferred_type in {None, "", "Unknown", "Concept"}:
+        return raw_name, preferred_type or "Concept"
+    return raw_name, preferred_type
+
+
+def _canonical_entity(name: str, entity_type: str | None = None) -> dict:
+    canonical_name, canonical_type = _lookup_canonical_entity(name, entity_type)
+    raw_name = _strip_concept_prefix(name)
+    aliases = set(_aliases_for(canonical_name, canonical_type))
+    if raw_name and raw_name != canonical_name:
+        aliases.add(raw_name)
+    paren = re.search(r"\(([^)]+)\)", raw_name)
+    if paren:
+        aliases.add(paren.group(1).strip())
+
+    return {
+        "id": f"concept:{_slug(canonical_name)}",
+        "name": canonical_name,
+        "type": canonical_type,
+        "aliases": sorted(a for a in aliases if a),
+        "source_mention": raw_name,
+    }
+
+
+def _merge_unique(existing, additions) -> list:
+    values = []
+    for item in existing or []:
+        if item not in values:
+            values.append(item)
+    for item in additions or []:
+        if item not in values:
+            values.append(item)
+    return values
+
+
+def _merge_node_attrs(existing: dict, incoming: dict) -> dict:
+    merged = dict(existing or {})
+    incoming = dict(incoming or {})
+
+    if merged.get("type") in {None, "", "Unknown", "Concept"} and incoming.get("type") not in {None, "", "Unknown"}:
+        merged["type"] = incoming["type"]
+    elif not merged.get("type"):
+        merged["type"] = incoming.get("type", "Concept")
+
+    for key in ("name", "canonical_name"):
+        incoming_value = incoming.get(key)
+        existing_value = merged.get(key)
+        if incoming_value and (not existing_value or _is_internal_id_label(str(existing_value))) and not _is_internal_id_label(str(incoming_value)):
+            merged[key] = incoming_value
+
+    if incoming.get("description") and not merged.get("description"):
+        merged["description"] = incoming["description"]
+
+    aliases = [a for a in incoming.get("aliases", []) if not _is_internal_id_label(str(a))]
+    mentions = [m for m in incoming.get("source_mentions", []) if not _is_internal_id_label(str(m))]
+    merged["aliases"] = _merge_unique(
+        [a for a in merged.get("aliases", []) if not _is_internal_id_label(str(a))],
+        aliases,
+    )
+    merged["source_mentions"] = _merge_unique(
+        [m for m in merged.get("source_mentions", []) if not _is_internal_id_label(str(m))],
+        mentions,
+    )
+    return merged
+
+
+def _add_or_update_edge(G: nx.DiGraph, source: str, target: str, relation: str, **properties) -> bool:
+    """添加边；若同一对节点已有边，按语义优先级合并。"""
+    if not source or not target or source == target:
+        return False
+
+    properties = {k: v for k, v in properties.items() if v not in (None, [], {}, "")}
+    if not G.has_edge(source, target):
+        G.add_edge(source, target, type=relation, **properties)
+        return True
+
+    edge = G.edges[source, target]
+    existing_relation = edge.get("type", "related_to")
+    changed = False
+    promoted = False
+
+    if RELATION_PRIORITY.get(relation, 0) > RELATION_PRIORITY.get(existing_relation, 0):
+        edge["type"] = relation
+        edge["alternate_relations"] = _merge_unique(edge.get("alternate_relations"), [existing_relation])
+        changed = True
+        promoted = True
+    elif relation != existing_relation:
+        edge["alternate_relations"] = _merge_unique(edge.get("alternate_relations"), [relation])
+        changed = True
+
+    for key, value in properties.items():
+        if isinstance(value, list):
+            merged = _merge_unique(edge.get(key), value)
+            if merged != edge.get(key):
+                edge[key] = merged
+                changed = True
+        elif promoted or key not in edge:
+            edge[key] = value
+            changed = True
+    return changed
+
+
+def _merge_nodes(G: nx.DiGraph, source_id: str, target_id: str, target_attrs: dict) -> bool:
+    if source_id == target_id or not G.has_node(source_id):
+        return False
+
+    if not G.has_node(target_id):
+        G.add_node(target_id, **target_attrs)
+    else:
+        G.nodes[target_id].update(_merge_node_attrs(G.nodes[target_id], target_attrs))
+
+    source_attrs = G.nodes[source_id]
+    G.nodes[target_id].update(_merge_node_attrs(G.nodes[target_id], source_attrs))
+
+    for pred, _, data in list(G.in_edges(source_id, data=True)):
+        if pred != target_id:
+            _add_or_update_edge(G, pred, target_id, data.get("type", "related_to"),
+                                **{k: v for k, v in data.items() if k != "type"})
+    for _, succ, data in list(G.out_edges(source_id, data=True)):
+        if succ != target_id:
+            _add_or_update_edge(G, target_id, succ, data.get("type", "related_to"),
+                                **{k: v for k, v in data.items() if k != "type"})
+
+    G.remove_node(source_id)
+    return True
+
+
+def _upsert_entity_node(G: nx.DiGraph, name: str, entity_type: str, paper_id: str | None = None) -> tuple[str, bool]:
+    entity = _canonical_entity(name, entity_type)
+    node_attrs = {
+        "type": entity["type"],
+        "name": entity["name"],
+        "canonical_name": entity["name"],
+        "aliases": [a for a in entity["aliases"] if not _is_internal_id_label(a)],
+        "source_mentions": [entity["source_mention"]] if entity["source_mention"] and not _is_internal_id_label(entity["source_mention"]) else [],
+    }
+    if paper_id and entity["source_mention"] and not _is_internal_id_label(entity["source_mention"]):
+        node_attrs["source_mentions"] = [f"{paper_id}: {entity['source_mention']}"]
+
+    node_id = entity["id"]
+    changed = False
+    if G.has_node(node_id):
+        merged = _merge_node_attrs(G.nodes[node_id], node_attrs)
+        changed = merged != dict(G.nodes[node_id])
+        G.nodes[node_id].update(merged)
+    else:
+        G.add_node(node_id, **node_attrs)
+        changed = True
+
+    aliases_norm = {_normalize_text(a) for a in entity["aliases"]}
+    aliases_norm.add(_normalize_text(entity["name"]))
+    raw_slug_ids = {
+        name,
+        f"concept:{_slug(name)}",
+        f"concept:{_slug(entity['name'])}",
+    }
+    for other_id, data in list(G.nodes(data=True)):
+        if other_id == node_id or data.get("type") in {"Paper", "Author"}:
+            continue
+        label = data.get("canonical_name") or data.get("name") or data.get("title") or other_id
+        if other_id in raw_slug_ids or _normalize_text(label) in aliases_norm:
+            changed = _merge_nodes(G, other_id, node_id, node_attrs) or changed
+
+    return node_id, changed
+
+
+def _normalize_graph_entities(G: nx.DiGraph) -> int:
+    """合并已知研究实体的别名节点，返回合并/更新次数。"""
+    changed = 0
+    for node_id, data in list(G.nodes(data=True)):
+        node_type = data.get("type", "Unknown")
+        if node_type in {"Paper", "Author"}:
+            continue
+        label = data.get("canonical_name") or data.get("name") or data.get("title") or node_id
+        if not label:
+            continue
+        _, did_change = _upsert_entity_node(G, label, node_type)
+        if did_change:
+            changed += 1
+    return changed
+
+
+def _entity_label(G: nx.DiGraph, node_id: str) -> str:
+    data = G.nodes.get(node_id, {})
+    return data.get("canonical_name") or data.get("name") or data.get("title") or node_id
+
+
+def _paper_features(G: nx.DiGraph, paper_id: str) -> dict[str, set[str]]:
+    features = {
+        "tasks": set(),
+        "datasets": set(),
+        "methods": set(),
+        "metrics": set(),
+    }
+    relation_map = {
+        "addresses_task": "tasks",
+        "evaluated_on": "datasets",
+        "uses_method": "methods",
+        "evaluated_with": "metrics",
+    }
+    for _, target, data in G.out_edges(paper_id, data=True):
+        bucket = relation_map.get(data.get("type"))
+        if bucket:
+            features[bucket].add(target)
+    return features
+
+
+def _shared_labels(G: nx.DiGraph, values: set[str]) -> list[str]:
+    return sorted(_entity_label(G, node_id) for node_id in values)
+
+
+def _paper_year(G: nx.DiGraph, paper_id: str) -> int | None:
+    year = G.nodes.get(paper_id, {}).get("year")
+    return year if isinstance(year, int) else None
+
+
+def _newer_first(G: nx.DiGraph, left: str, right: str) -> tuple[str, str]:
+    left_year = _paper_year(G, left)
+    right_year = _paper_year(G, right)
+    if left_year is not None and right_year is not None and right_year > left_year:
+        return right, left
+    return left, right
+
+
+def _infer_paper_relations(G: nx.DiGraph, paper_id: str | None = None) -> int:
+    """根据共享实体和引用关系推断论文间语义边。"""
+    paper_ids = [
+        node_id for node_id, data in G.nodes(data=True)
+        if data.get("type") == "Paper" and (paper_id is None or node_id == paper_id or G.has_node(paper_id))
+    ]
+    if paper_id:
+        paper_ids = [paper_id] if G.has_node(paper_id) else []
+
+    changed = 0
+    all_papers = [node_id for node_id, data in G.nodes(data=True) if data.get("type") == "Paper"]
+    for current in paper_ids:
+        current_features = _paper_features(G, current)
+        if not any(current_features.values()):
+            continue
+
+        for other in all_papers:
+            if other == current:
+                continue
+            other_features = _paper_features(G, other)
+            shared = {
+                "shared_tasks": current_features["tasks"] & other_features["tasks"],
+                "shared_datasets": current_features["datasets"] & other_features["datasets"],
+                "shared_methods": current_features["methods"] & other_features["methods"],
+                "shared_metrics": current_features["metrics"] & other_features["metrics"],
+            }
+            if not any(shared.values()):
+                continue
+            direct_citation = G.has_edge(current, other) and G.edges[current, other].get("type") == "cites"
+
+            props = {
+                "shared_tasks": _shared_labels(G, shared["shared_tasks"]),
+                "shared_datasets": _shared_labels(G, shared["shared_datasets"]),
+                "shared_methods": _shared_labels(G, shared["shared_methods"]),
+                "shared_metrics": _shared_labels(G, shared["shared_metrics"]),
+            }
+
+            if shared["shared_datasets"]:
+                changed += int(_add_or_update_edge(G, current, other, "uses_same_dataset",
+                                                   inference="shared_entities", confidence=0.55, **props))
+            if shared["shared_tasks"]:
+                changed += int(_add_or_update_edge(G, current, other, "solves_same_task",
+                                                   inference="shared_entities", confidence=0.55, **props))
+            if shared["shared_methods"]:
+                changed += int(_add_or_update_edge(G, current, other, "shares_method_family",
+                                                   inference="shared_entities", confidence=0.55, **props))
+
+            overlap_groups = sum(1 for values in shared.values() if values)
+            if overlap_groups >= 2:
+                changed += int(_add_or_update_edge(G, current, other, "compares_with",
+                                                   inference="shared_entities", confidence=0.65, **props))
+
+            if shared["shared_metrics"] and (shared["shared_datasets"] or shared["shared_tasks"]):
+                source, target = _newer_first(G, current, other)
+                changed += int(_add_or_update_edge(
+                    G, source, target, "improves_metric_on",
+                    inference="candidate_from_shared_metric",
+                    confidence=0.35,
+                    evidence_note="Shared metric context only; verify actual reported scores before treating as proven improvement.",
+                    **props,
+                ))
+
+            if direct_citation:
+                if shared["shared_tasks"] or shared["shared_methods"]:
+                    changed += int(_add_or_update_edge(
+                        G, current, other, "extends",
+                        inference="citation_plus_shared_entities",
+                        confidence=0.75,
+                        **props,
+                    ))
+
+    return changed
+
+
+def _safe_user_id(user_id: str | None) -> str:
+    raw = str(user_id or DEFAULT_KG_USER).strip() or DEFAULT_KG_USER
+    safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", raw)
+    return safe.strip("._") or DEFAULT_KG_USER
+
+
+def _kg_path(user_id: str | None = None) -> str:
+    """Return the per-user knowledge graph path under workspace/{user_id}."""
+    safe_user_id = _safe_user_id(user_id)
+    try:
+        from novare.config import get_user_workspace
+        workspace = get_user_workspace(safe_user_id)
+    except Exception:
+        base = os.getenv("NOVARE_WORKSPACE", "workspace")
+        workspace = os.path.join(base, safe_user_id)
+        os.makedirs(workspace, exist_ok=True)
+    return os.path.join(workspace, "knowledge_graph.json")
 
 
 # ── LLM 实体抽取 ──────────────────────────────────────────────────────────
@@ -253,28 +657,52 @@ def _llm_extract_entities(text: str) -> list[dict]:
         return []
 
 
-def _load_graph() -> nx.DiGraph:
+def _load_graph(user_id: str | None = None) -> nx.DiGraph:
     """加载知识图谱"""
-    if os.path.exists(KG_PATH):
+    path = _kg_path(user_id)
+    legacy_fallback = not user_id and not os.path.exists(path) and os.path.exists(KG_PATH)
+    load_path = KG_PATH if legacy_fallback else path
+    if os.path.exists(load_path):
         try:
-            with open(KG_PATH, "r", encoding="utf-8") as f:
+            with open(load_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            return nx.node_link_graph(data, directed=True)
+            edge_key = "edges" if "edges" in data else "links"
+            try:
+                G = nx.node_link_graph(data, directed=True, edges=edge_key)
+            except TypeError:
+                G = nx.node_link_graph(data, directed=True, link=edge_key)
+            G.graph["_kg_user_id"] = _safe_user_id(user_id)
+            G.graph["_kg_path"] = path
+            return G
         except Exception as e:
-            logger.warning("Failed to load knowledge graph: %s", e)
-    return nx.DiGraph()
+            logger.warning("Failed to load knowledge graph from %s: %s", load_path, e)
+    G = nx.DiGraph()
+    G.graph["_kg_user_id"] = _safe_user_id(user_id)
+    G.graph["_kg_path"] = path
+    return G
 
 
-def _save_graph(G: nx.DiGraph) -> None:
+def _save_graph(G: nx.DiGraph, user_id: str | None = None) -> None:
     """保存知识图谱"""
-    os.makedirs(os.path.dirname(KG_PATH), exist_ok=True)
-    data = nx.node_link_data(G)
-    with open(KG_PATH, "w", encoding="utf-8") as f:
+    path = _kg_path(user_id or G.graph.get("_kg_user_id"))
+    G.graph["_kg_user_id"] = _safe_user_id(user_id or G.graph.get("_kg_user_id"))
+    G.graph["_kg_path"] = path
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    _normalize_graph_entities(G)
+    graph_meta = dict(G.graph)
+    G.graph.pop("_kg_user_id", None)
+    G.graph.pop("_kg_path", None)
+    try:
+        data = nx.node_link_data(G, edges="edges")
+    except TypeError:
+        data = nx.node_link_data(G)
+    G.graph.update(graph_meta)
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 # Actions that mutate the graph (need PG sync)
-_MUTATING_ACTIONS = {"add_paper", "add_concept", "add_relation", "extract_from_abstract"}
+_MUTATING_ACTIONS = {"add_paper", "add_concept", "add_relation", "extract_from_abstract", "normalize"}
 
 
 def save_to_pg(user_id: str, graph: nx.DiGraph):
@@ -342,14 +770,17 @@ def save_to_pg(user_id: str, graph: nx.DiGraph):
                     KnowledgeEdge.target_node_id == tgt_id,
                     KnowledgeEdge.relation_type == rel_type,
                 ).first()
+                edge_props = {k: v for k, v in edata.items() if k != "type"}
                 if not existing_edge:
                     db.add(KnowledgeEdge(
                         user_id=uid,
                         source_node_id=src_id,
                         target_node_id=tgt_id,
                         relation_type=rel_type,
-                        properties={k: v for k, v in edata.items() if k != "type"},
+                        properties=edge_props,
                     ))
+                else:
+                    existing_edge.properties = edge_props
 
             db.commit()
         finally:
@@ -384,13 +815,16 @@ def _action_add_paper(G: nx.DiGraph, args: dict) -> str:
         author_id = f"author:{author_name.strip().lower().replace(' ', '_')}"
         if not G.has_node(author_id):
             G.add_node(author_id, type="Author", name=author_name.strip())
-        G.add_edge(paper_id, author_id, type="authored_by")
+        _add_or_update_edge(G, paper_id, author_id, "authored_by")
 
     # 引用关系
     for cited_id in citations.get("citing", []):
         if not G.has_node(cited_id):
             G.add_node(cited_id, type="Paper", title=cited_id)
-        G.add_edge(paper_id, cited_id, type="cites")
+        _add_or_update_edge(G, paper_id, cited_id, "cites")
+
+    _normalize_graph_entities(G)
+    semantic_count = _infer_paper_relations(G, paper_id)
 
     _save_graph(G)
 
@@ -401,6 +835,7 @@ def _action_add_paper(G: nx.DiGraph, args: dict) -> str:
         "title": paper["title"],
         "author_count": len(authors),
         "citation_count": len(citations.get("citing", [])),
+        "semantic_relations_added": semantic_count,
         "graph_stats": {"nodes": node_count, "edges": edge_count},
     }, summary=f"已添加论文到知识图谱: {paper['title']}")
 
@@ -411,11 +846,16 @@ def _action_add_concept(G: nx.DiGraph, args: dict) -> str:
     if not name:
         return fail("knowledge_graph", "请提供概念名称 (name)。")
 
-    concept_id = f"concept:{name.strip().lower().replace(' ', '_')}"
-    G.add_node(concept_id, type="Concept", name=name.strip(),
-               description=args.get("description", ""))
+    concept_id, _ = _upsert_entity_node(G, name.strip(), args.get("type", "Concept"))
+    if args.get("description"):
+        G.nodes[concept_id]["description"] = args["description"]
     _save_graph(G)
-    return ok("knowledge_graph", {"action": "add_concept", "name": name}, summary=f"已添加概念: {name}")
+    return ok("knowledge_graph", {
+        "action": "add_concept",
+        "name": G.nodes[concept_id].get("name", name),
+        "canonical_id": concept_id,
+        "aliases": G.nodes[concept_id].get("aliases", []),
+    }, summary=f"已添加概念: {G.nodes[concept_id].get('name', name)}")
 
 
 def _action_add_relation(G: nx.DiGraph, args: dict) -> str:
@@ -427,19 +867,25 @@ def _action_add_relation(G: nx.DiGraph, args: dict) -> str:
     if not all([subject, predicate, obj]):
         return fail("knowledge_graph", "请提供 subject、predicate、object。")
 
-    # 确保节点存在
-    if not G.has_node(subject):
-        G.add_node(subject, type="Unknown")
-    if not G.has_node(obj):
-        G.add_node(obj, type="Unknown")
+    subject_id = _find_node(G, subject) or subject
+    object_id = _find_node(G, obj) or obj
 
-    G.add_edge(subject, obj, type=predicate)
+    # 确保节点存在；已知研究实体会被归一化为 canonical concept 节点。
+    if not G.has_node(subject_id):
+        subject_id, _ = _upsert_entity_node(G, subject, "Unknown")
+    if not G.has_node(object_id):
+        object_id, _ = _upsert_entity_node(G, obj, "Unknown")
+
+    _add_or_update_edge(G, subject_id, object_id, predicate)
+    _normalize_graph_entities(G)
+    semantic_count = _infer_paper_relations(G)
     _save_graph(G)
     return ok("knowledge_graph", {
         "action": "add_relation",
         "subject": subject,
         "predicate": predicate,
         "object": obj,
+        "semantic_relations_added": semantic_count,
     }, summary=f"已添加关系: {subject} --[{predicate}]--> {obj}")
 
 
@@ -559,6 +1005,20 @@ def _action_stats(G: nx.DiGraph, args: dict) -> str:
     }, summary=f"知识图谱: {node_count} 节点, {edge_count} 边")
 
 
+def _action_normalize(G: nx.DiGraph, args: dict) -> str:
+    """归一化已有实体并重建论文间语义关系。"""
+    normalized_count = _normalize_graph_entities(G)
+    semantic_count = _infer_paper_relations(G, args.get("paper_id"))
+    _save_graph(G)
+    return ok("knowledge_graph", {
+        "action": "normalize",
+        "paper_id": args.get("paper_id"),
+        "normalized_entities": normalized_count,
+        "semantic_relations_added": semantic_count,
+        "graph_stats": {"nodes": G.number_of_nodes(), "edges": G.number_of_edges()},
+    }, summary=f"图谱归一化完成: 归一化/合并 {normalized_count} 个实体，补充 {semantic_count} 条论文语义关系")
+
+
 def _action_extract_from_abstract(G: nx.DiGraph, args: dict) -> str:
     """从论文摘要中自动提取实体并构建知识图谱
 
@@ -591,7 +1051,7 @@ def _action_extract_from_abstract(G: nx.DiGraph, args: dict) -> str:
         if not G.has_node(author_id):
             G.add_node(author_id, type="Author", name=author_name.strip())
         if not G.has_edge(paper_id, author_id):
-            G.add_edge(paper_id, author_id, type="authored_by")
+            _add_or_update_edge(G, paper_id, author_id, "authored_by")
 
     # 获取实体列表：优先使用手动提供的 entities，否则从摘要自动提取
     manual_entities = args.get("entities", [])
@@ -646,33 +1106,30 @@ def _action_extract_from_abstract(G: nx.DiGraph, args: dict) -> str:
     }
 
     added = []
+    entity_ids = []
     for ent in entities:
         name = ent["name"]
         etype = ent["type"]
-        concept_id = f"concept:{name.lower().replace(' ', '_')}"
-
-        # 创建概念节点
-        if not G.has_node(concept_id):
-            G.add_node(concept_id, type=etype, name=name)
-        elif G.nodes[concept_id].get("type") == "Unknown":
-            G.nodes[concept_id]["type"] = etype
-            G.nodes[concept_id]["name"] = name
+        concept_id, _ = _upsert_entity_node(G, name, etype, paper_id=paper_id)
+        entity_ids.append((concept_id, G.nodes[concept_id].get("type", etype)))
 
         # 创建关系
-        relation = RELATION_MAP.get(etype, "related_to")
-        if not G.has_edge(paper_id, concept_id):
-            G.add_edge(paper_id, concept_id, type=relation)
-            added.append(f"  {paper.get('title', paper_id)[:40]} --[{relation}]--> {name}")
+        relation = RELATION_MAP.get(G.nodes[concept_id].get("type", etype), "related_to")
+        if _add_or_update_edge(G, paper_id, concept_id, relation):
+            added.append(f"  {paper.get('title', paper_id)[:40]} --[{relation}]--> {G.nodes[concept_id].get('name', name)}")
 
     # 自动建立 Method 之间的 "related_to" 关系
     method_ids = [
-        f"concept:{e['name'].lower().replace(' ', '_')}"
-        for e in entities if e["type"] == "Method"
+        entity_id
+        for entity_id, entity_type in entity_ids if entity_type == "Method"
     ]
     for i, m1 in enumerate(method_ids):
         for m2 in method_ids[i+1:]:
             if not G.has_edge(m1, m2) and not G.has_edge(m2, m1):
-                G.add_edge(m1, m2, type="related_to")
+                _add_or_update_edge(G, m1, m2, "related_to")
+
+    normalized_count = _normalize_graph_entities(G)
+    semantic_count = _infer_paper_relations(G, paper_id)
 
     _save_graph(G)
 
@@ -684,6 +1141,8 @@ def _action_extract_from_abstract(G: nx.DiGraph, args: dict) -> str:
         "source": source,
         "entities_added": len(entities),
         "relations_added": len(added),
+        "normalized_entities": normalized_count,
+        "semantic_relations_added": semantic_count,
         "graph_stats": {"nodes": node_count, "edges": edge_count},
     }, summary=f"实体提取完成({source}): {paper.get('title', paper_id)}")
 
@@ -693,10 +1152,16 @@ def _find_node(G: nx.DiGraph, name: str) -> Optional[str]:
     if G.has_node(name):
         return name
     name_lower = name.lower()
+    name_norm = _normalize_text(name)
     for node, data in G.nodes(data=True):
         if data.get("name", "").lower() == name_lower:
             return node
         if data.get("title", "").lower() == name_lower:
+            return node
+        if _normalize_text(data.get("canonical_name", "")) == name_norm:
+            return node
+        aliases = data.get("aliases") or []
+        if any(_normalize_text(alias) == name_norm for alias in aliases):
             return node
     return None
 
@@ -749,6 +1214,7 @@ ACTION_MAP = {
     "add_concept": _action_add_concept,
     "add_relation": _action_add_relation,
     "extract_from_abstract": _action_extract_from_abstract,
+    "normalize": _action_normalize,
     "query": _action_query,
     "find_path": _action_find_path,
     "stats": _action_stats,
@@ -761,7 +1227,7 @@ async def handle_knowledge_graph(args: dict, user_id: str = None) -> str:
     if not action or action not in ACTION_MAP:
         return fail("knowledge_graph", f"未知的 action '{action}'。支持: {', '.join(ACTION_MAP.keys())}")
 
-    G = _load_graph()
+    G = _load_graph(user_id)
     handler = ACTION_MAP[action]
     result = handler(G, args)
 
@@ -777,7 +1243,7 @@ def extract_from_abstract_sync(paper_id: str, entities: list[dict] | None = None
 
     返回统一 JSON 字符串 (ok/fail)。调用方可以 json.loads() 获取结构化数据。
     """
-    G = _load_graph()
+    G = _load_graph(user_id)
     args = {"paper_id": paper_id}
     if entities:
         args["entities"] = entities

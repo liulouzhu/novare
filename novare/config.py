@@ -44,6 +44,9 @@ class NovareConfig:
     max_iterations: int = 20                # 主 agent 最大工具调用轮次
     subagent_max_iterations: int = 16       # 子智能体最大工具调用轮次
 
+    # 代理
+    proxy: str | None = None                # HTTP 代理地址；留空则不使用代理
+
     # 超时（秒）
     turn_timeout: int = 300                 # 主 agent 单轮超时（默认 5 分钟）
     subagent_turn_timeout: int = 600        # 子智能体单轮超时（默认 10 分钟）
@@ -88,6 +91,11 @@ class NovareConfig:
         sub_turn_timeout = os.environ.get("NOVARE_SUBAGENT_TURN_TIMEOUT")
         if sub_turn_timeout:
             cfg.subagent_turn_timeout = int(sub_turn_timeout)
+
+        # 代理
+        proxy = os.environ.get("NOVARE_PROXY")
+        if proxy:
+            cfg.proxy = proxy
 
         # 长期记忆
         enable_memory = os.environ.get("NOVARE_ENABLE_LONG_TERM_MEMORY")

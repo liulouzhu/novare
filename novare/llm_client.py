@@ -111,7 +111,7 @@ def parse_stream_line(line: str) -> StreamChunk | None:
 class LLMClient:
     """OpenAI 兼容 API 客户端（接 MiniMax）"""
 
-    def __init__(self, api_key: str, base_url: str, model: str):
+    def __init__(self, api_key: str, base_url: str, model: str, proxy: str | None = None):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -121,6 +121,7 @@ class LLMClient:
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
+            proxy=proxy,
             timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0),
         )
 

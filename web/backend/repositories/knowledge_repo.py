@@ -96,7 +96,7 @@ class KnowledgeRepository(BaseRepository):
             if src in excluded_ids or tgt in excluded_ids:
                 continue
             filtered_links.append(
-                {"source": src, "target": tgt, "relation": e.relation_type}
+                {"source": src, "target": tgt, "relation": e.relation_type, **(e.properties or {})}
             )
 
         return {"nodes": filtered_nodes, "links": filtered_links}

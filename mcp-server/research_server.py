@@ -96,16 +96,17 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="knowledge_graph",
-            description="查询或更新论文知识图谱。支持添加论文/概念/关系，查询子图，查找路径。",
+            description="查询或更新当前用户的论文知识图谱（存储在 workspace/{user_id}/knowledge_graph.json）。支持添加论文/概念/关系，查询子图，查找路径。",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["add_paper", "add_concept", "add_relation", "extract_from_abstract", "query", "find_path", "stats"],
+                        "enum": ["add_paper", "add_concept", "add_relation", "extract_from_abstract", "normalize", "query", "find_path", "stats"],
                     },
                     "paper_id": {"type": "string"},
                     "name": {"type": "string"},
+                    "type": {"type": "string", "description": "概念类型（可选）"},
                     "description": {"type": "string"},
                     "subject": {"type": "string"},
                     "predicate": {"type": "string"},
@@ -113,12 +114,12 @@ async def list_tools() -> list[Tool]:
                     "target": {"type": "string"},
                     "entities": {
                         "type": "array",
-                        "description": "手动提供的实体列表（可选），每项含 name 和 type（Method/Dataset/Task）",
+                        "description": "手动提供的实体列表（可选），每项含 name 和 type（Method/Dataset/Task/Metric/Contribution/Limitation）",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "name": {"type": "string"},
-                                "type": {"type": "string", "enum": ["Method", "Dataset", "Task"]},
+                                "type": {"type": "string", "enum": ["Method", "Dataset", "Task", "Metric", "Contribution", "Limitation", "Concept"]},
                             },
                             "required": ["name"],
                         },

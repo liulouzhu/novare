@@ -55,6 +55,7 @@ class AgentService:
             api_key=self.config.api_key,
             base_url=self.config.base_url,
             model=self.config.model,
+            proxy=self.config.proxy,
         )
 
         # 评审模型（可选，用于双模型对抗评审）
@@ -63,6 +64,7 @@ class AgentService:
                 api_key=self.config.reviewer_api_key,
                 base_url=self.config.reviewer_base_url or self.config.base_url,
                 model=self.config.reviewer_model or self.config.model,
+                proxy=self.config.proxy,
             )
             logger.info("Reviewer model enabled: %s", self.config.reviewer_model or self.config.model)
         else:

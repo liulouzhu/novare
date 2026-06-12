@@ -169,12 +169,23 @@ export interface GraphNode {
   year: number | null
   citation_count: number
   description: string
+  canonical_name?: string
+  aliases?: string[]
+  source_mentions?: string[]
 }
 
 export interface GraphLink {
   source: string
   target: string
   type: string
+  alternate_relations?: string[]
+  confidence?: number | null
+  inference?: string
+  shared_tasks?: string[]
+  shared_datasets?: string[]
+  shared_methods?: string[]
+  shared_metrics?: string[]
+  evidence_note?: string
 }
 
 export interface GraphData {
