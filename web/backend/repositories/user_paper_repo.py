@@ -70,3 +70,17 @@ class UserPaperRepository(BaseRepository):
             UserPaper.paper_id == paper_id,
         ).first()
         return row is not None and row.has_fulltext_access
+
+    def dissociate(self, paper_id: str) -> bool:
+        """移除当前用户与论文的关联，返回是否确实删除了记录。"""
+        deleted = self.db.query(UserPaper).filter(
+            UserPaper.user_id == self.user_id,
+            UserPaper.paper_id == paper_id,
+        ).delete()
+        return deleted > 0
+
+    def count_associations(self, paper_id: str) -> int:
+        """统计有多少用户关联了该论文。"""
+        return self.db.query(UserPaper).filter(
+            UserPaper.paper_id == paper_id,
+        ).count()

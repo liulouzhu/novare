@@ -167,6 +167,11 @@ export async function fetchPaperFullText(paperId: string): Promise<PaperFullText
   return res.json()
 }
 
+export async function deletePaper(paperId: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/papers/${encodeURIComponent(paperId)}`, { method: 'DELETE', headers: authHeaders() })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to delete paper') }
+}
+
 // ── Upload ──
 
 export async function uploadFile(file: File): Promise<{ filename: string; file_path: string; message: string }> {

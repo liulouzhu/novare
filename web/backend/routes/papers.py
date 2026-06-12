@@ -12,7 +12,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from web.backend.db.base import get_db
-from web.backend.db.models import User, Chunk
+from web.backend.db.models import User, Chunk, Embedding, Citation, UserPaper
 from web.backend.auth.dependencies import get_current_user
 from web.backend.auth.service import decode_access_token
 from web.backend.repositories import PaperRepository, UserPaperRepository
@@ -257,3 +257,47 @@ async def get_paper(
 
     is_parsed = user_paper_repo.has_fulltext_access(paper_id)
     return _paper_to_out(paper, is_parsed)
+
+
+@router.delete("/{paper_id:path}")
+async def delete_paper(
+    paper_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """从当前用户的论文库中移除论文。
+
+    - 移除 user-paper 关联（论文不再出现在该用户的列表中）
+    - 如果该用户是论文创建者且无其他用户关联，同时删除论文及关联的 chunks / embeddings / citations
+    """
+    paper_repo = PaperRepository(db)
+    user_paper_repo = UserPaperRepository(db, user.id)
+
+    paper = paper_repo.get_visible(paper_id, user.id)
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    # 1. 移除用户关联
+    dissociated = user_paper_repo.dissociate(paper_id)
+    if not dissociated:
+        raise HTTPException(status_code=404, detail="Paper not associated with user")
+
+    # 2. 如果是创建者且无其他用户引用，彻底删除论文及关联数据
+    if paper.created_by_user_id == user.id:
+        remaining = user_paper_repo.count_associations(paper_id)
+        if remaining == 0:
+            # 删除 embeddings（通过 chunks 关联）
+            chunk_ids = [c.id for c in db.query(Chunk.id).filter(Chunk.paper_id == paper_id).all()]
+            if chunk_ids:
+                db.query(Embedding).filter(Embedding.chunk_id.in_(chunk_ids)).delete()
+            # 删除 chunks
+            db.query(Chunk).filter(Chunk.paper_id == paper_id).delete()
+            # 删除 citations
+            db.query(Citation).filter(
+                (Citation.source_id == paper_id) | (Citation.target_id == paper_id)
+            ).delete()
+            # 删除论文
+            db.delete(paper)
+
+    db.commit()
+    return {"ok": True}

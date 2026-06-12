@@ -1,8 +1,8 @@
 /** 论文库页面 */
 
 import { useState, useEffect, useRef, type CSSProperties, type FormEvent } from 'react'
-import { type Paper, type PaperFullText, fetchPaperFullText, fetchPapers } from '@/lib/api'
-import { Search, FileText, ExternalLink, Loader2, RefreshCw, BookOpen, X, AlertCircle } from 'lucide-react'
+import { type Paper, type PaperFullText, fetchPaperFullText, fetchPapers, deletePaper } from '@/lib/api'
+import { Search, FileText, ExternalLink, Loader2, RefreshCw, BookOpen, X, AlertCircle, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { MarkdownRenderer } from '@/components/shared/MarkdownRenderer'
 
@@ -16,6 +16,7 @@ export function PaperLibraryPage() {
   const [readerData, setReaderData] = useState<PaperFullText | null>(null)
   const [readerLoading, setReaderLoading] = useState(false)
   const [readerError, setReaderError] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<Paper | null>(null)
   const readerRequestId = useRef(0)
 
   const loadPapers = async () => {
@@ -74,6 +75,21 @@ export function PaperLibraryPage() {
       return
     }
     setExpandedId(expandedId === paper.id ? null : paper.id)
+  }
+
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return
+    try {
+      await deletePaper(deleteTarget.id)
+      setPapers((prev) => prev.filter((p) => p.id !== deleteTarget.id))
+      if (readerPaper?.id === deleteTarget.id) {
+        setReaderPaper(null)
+        setReaderData(null)
+      }
+    } catch (e) {
+      console.error('Failed to delete paper:', e)
+    }
+    setDeleteTarget(null)
   }
 
   return (
@@ -223,6 +239,17 @@ export function PaperLibraryPage() {
                         <ExternalLink size={14} style={{ color: 'var(--text-tertiary)' }} />
                       </a>
                     )}
+                    <button
+                      type="button"
+                      className="p-1.5 rounded-md hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setDeleteTarget(paper)
+                      }}
+                      title="删除"
+                    >
+                      <Trash2 size={14} style={{ color: 'var(--error)' }} />
+                    </button>
                   </div>
                 </div>
 
@@ -299,6 +326,37 @@ export function PaperLibraryPage() {
           </aside>
         )}
       </div>
+      {/* 删除确认弹窗 */}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ backgroundColor: 'rgba(0,0,0,0.4)' }} onClick={() => setDeleteTarget(null)}>
+          <div
+            className="w-80 rounded-xl border shadow-xl p-5"
+            style={{ borderColor: 'var(--border-color)', backgroundColor: 'var(--bg-primary)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <div className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>删除论文</div>
+              <button onClick={() => setDeleteTarget(null)} className="p-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
+                <X size={14} style={{ color: 'var(--text-tertiary)' }} />
+              </button>
+            </div>
+            <p className="text-sm mb-2" style={{ color: 'var(--text-secondary)' }}>确定要从论文库中移除以下论文吗？</p>
+            <p className="text-xs mb-5 truncate font-medium" style={{ color: 'var(--text-primary)' }}>{deleteTarget.title}</p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setDeleteTarget(null)}
+                className="px-3 py-1.5 text-sm rounded-lg border transition-colors hover:bg-gray-50 dark:hover:bg-gray-800"
+                style={{ borderColor: 'var(--border-color)', color: 'var(--text-primary)' }}
+              >取消</button>
+              <button
+                onClick={handleConfirmDelete}
+                className="px-3 py-1.5 text-sm rounded-lg text-white transition-colors hover:opacity-90"
+                style={{ backgroundColor: 'var(--error)' }}
+              >删除</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
