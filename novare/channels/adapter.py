@@ -195,15 +195,79 @@ class AgentAdapter:
 
         策略：
         1. 如果配置了 default_user_id，直接使用（单用户场景）。
-        2. 否则尝试从数据库查询 channel_users 映射表。
-        3. 都没有则返回 None（使用默认 workspace）。
+        2. 查询 channel_users 映射表，找到已有映射则返回。
+        3. 没有映射则自动注册：创建 Novare User + ChannelUser 映射。
         """
         if self.default_user_id:
             return self.default_user_id
 
-        # TODO: 查询 channel_users 映射表（首次自动注册）
-        # 暂时返回 None，使用默认 workspace
-        return None
+        if not self.db_session_factory:
+            return None
+
+        try:
+            from uuid import UUID
+            from web.backend.db.models import ChannelUser, User
+            from web.backend.db.base import SessionLocal
+
+            db = SessionLocal()
+            try:
+                # 查询已有映射
+                mapping = db.query(ChannelUser).filter(
+                    ChannelUser.channel == channel,
+                    ChannelUser.platform_user_id == sender_id,
+                ).first()
+
+                if mapping:
+                    return str(mapping.novare_user_id)
+
+                # 自动注册新用户
+                user_id = self._auto_register_user(db, sender_id, channel)
+                db.commit()
+                return user_id
+            except Exception:
+                db.rollback()
+                logger.exception("Failed to resolve channel user")
+                return None
+            finally:
+                db.close()
+        except Exception:
+            logger.exception("DB connection failed in _resolve_user")
+            return None
+
+    @staticmethod
+    def _auto_register_user(db: Any, sender_id: str, channel: str) -> str:
+        """为渠道用户自动创建 Novare 用户和映射记录。"""
+        import hashlib
+        import secrets
+        from web.backend.db.models import ChannelUser, User
+
+        # 生成唯一用户名和邮箱
+        sender_hash = hashlib.md5(f"{channel}:{sender_id}".encode()).hexdigest()[:10]
+        username = f"{channel}_{sender_hash}"
+        email = f"{channel}_{sender_hash}@channel.novare.local"
+        # 随机密码哈希，该用户不能通过 Web 登录，只能通过渠道使用
+        password_hash = secrets.token_hex(32)
+
+        # 创建 Novare 用户
+        user = User(
+            username=username,
+            email=email,
+            password_hash=password_hash,
+        )
+        db.add(user)
+        db.flush()  # 获取 user.id
+
+        # 创建渠道映射
+        mapping = ChannelUser(
+            novare_user_id=user.id,
+            channel=channel,
+            platform_user_id=sender_id,
+        )
+        db.add(mapping)
+        db.flush()
+
+        logger.info("Auto-registered channel user: %s:%s -> %s (%s)", channel, sender_id, user.id, username)
+        return str(user.id)
 
     async def _persist_session(self, session: Any, user_id: str | None) -> None:
         """持久化会话消息到 DB。"""

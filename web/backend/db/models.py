@@ -159,6 +159,23 @@ class KnowledgeEdge(Base):
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class ChannelUser(Base):
+    """渠道用户映射 — 将平台 sender_id 关联到 Novare user_id。"""
+    __tablename__ = "channel_users"
+    __table_args__ = (
+        UniqueConstraint("channel", "platform_user_id", name="uq_channel_user"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=gen_uuid)
+    novare_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    channel = Column(String(32), nullable=False)           # weixin, telegram, ...
+    platform_user_id = Column(String(128), nullable=False)  # 平台用户 ID
+    platform_username = Column(String(128))                 # 平台昵称（可选）
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    user = relationship("User")
+
+
 class UserMemory(Base):
     """用户长期记忆 — 自动从对话中提取的用户偏好。"""
     __tablename__ = "user_memories"
