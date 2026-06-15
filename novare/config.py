@@ -47,6 +47,11 @@ class NovareConfig:
     # 代理
     proxy: str | None = None                # HTTP 代理地址；留空则不使用代理
 
+    # 多渠道接入
+    channels_enabled: bool = False              # 是否启用多渠道系统
+    channels: dict[str, dict] = field(default_factory=dict)  # 渠道配置，如 {"weixin": {"enabled": True, ...}}
+    channel_default_user_id: str = ""           # 渠道消息的默认用户 ID（留空则使用匿名 workspace）
+
     # 超时（秒）
     turn_timeout: int = 300                 # 主 agent 单轮超时（默认 5 分钟）
     subagent_turn_timeout: int = 600        # 子智能体单轮超时（默认 10 分钟）
@@ -97,6 +102,19 @@ class NovareConfig:
         if proxy:
             cfg.proxy = proxy
 
+        # 多渠道（环境变量覆盖）
+        channels_enabled = os.environ.get("NOVARE_CHANNELS_ENABLED")
+        if channels_enabled:
+            cfg.channels_enabled = channels_enabled.lower() in ("1", "true", "yes")
+        channel_default_user = os.environ.get("NOVARE_CHANNEL_DEFAULT_USER_ID")
+        if channel_default_user:
+            cfg.channel_default_user_id = channel_default_user
+        weixin_token = os.environ.get("NOVARE_WEIXIN_TOKEN")
+        if weixin_token:
+            cfg.channels.setdefault("weixin", {})["token"] = weixin_token
+            cfg.channels["weixin"]["enabled"] = True
+            cfg.channels_enabled = True
+
         # 长期记忆
         enable_memory = os.environ.get("NOVARE_ENABLE_LONG_TERM_MEMORY")
         if enable_memory is not None:
@@ -127,6 +145,12 @@ class NovareConfig:
                                 args=srv.get("args", []),
                                 env=srv.get("env", {}),
                             )
+                # 多渠道配置
+                if isinstance(data, dict) and "channels" in data:
+                    cfg.channels = data["channels"]
+                    cfg.channels_enabled = any(
+                        ch.get("enabled", False) for ch in cfg.channels.values() if isinstance(ch, dict)
+                    )
             except (json.JSONDecodeError, OSError):
                 pass  # 配置文件损坏时使用默认值
 

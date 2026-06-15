@@ -21,7 +21,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 from fastapi import FastAPI  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from web.backend.agent_service import AgentService  # noqa: E402
-from web.backend.db.base import Base, engine  # noqa: E402
+from web.backend.db.base import Base, SessionLocal, engine  # noqa: E402
 from web.backend.sandbox.manager import (  # noqa: E402
     IDLE_TIMEOUT,
     sandbox_manager,
@@ -62,6 +62,27 @@ async def lifespan(app: FastAPI):
     web_logger.info("Sandbox idle cleanup task started (interval=%ds)", max(60, IDLE_TIMEOUT // 4))
 
     await agent_service.initialize()
+
+    # ── 多渠道接入系统 ──
+    channel_tasks: list[asyncio.Task] = []
+    if agent_service.config and agent_service.config.channels_enabled:
+        from novare.channels.bus import MessageBus
+        from novare.channels.manager import ChannelManager
+        from novare.channels.adapter import AgentAdapter
+
+        bus = MessageBus()
+        manager = ChannelManager(agent_service.config.channels, bus)
+        adapter = AgentAdapter(
+            bus=bus,
+            agent_service=agent_service,
+            db_session_factory=SessionLocal,
+            default_user_id=agent_service.config.channel_default_user_id or None,
+        )
+
+        channel_tasks.append(asyncio.create_task(manager.start_all()))
+        channel_tasks.append(asyncio.create_task(adapter.run()))
+        web_logger.info("Channel system started: %s", list(manager.channels.keys()))
+
     try:
         yield
     finally:
@@ -75,6 +96,18 @@ async def lifespan(app: FastAPI):
             sandbox_manager.shutdown()
         except Exception:
             web_logger.warning("Sandbox shutdown error (non-fatal)", exc_info=True)
+
+        # Shut down channel system
+        if channel_tasks:
+            await adapter.stop()
+            await manager.stop_all()
+            for t in channel_tasks:
+                t.cancel()
+            for t in channel_tasks:
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
 
         try:
             await agent_service.shutdown()
