@@ -15,6 +15,18 @@ class McpServerConfig:
     env: dict[str, str] = field(default_factory=dict)
 
 
+def _any_channel_enabled(channels: dict) -> bool:
+    """检查 channels 配置中是否有任何渠道 enabled（支持 dict 和 list 格式）。"""
+    for ch in channels.values():
+        if isinstance(ch, dict) and ch.get("enabled", False):
+            return True
+        if isinstance(ch, list):
+            for item in ch:
+                if isinstance(item, dict) and item.get("enabled", False):
+                    return True
+    return False
+
+
 @dataclass
 class NovareConfig:
     api_key: str = ""
@@ -148,9 +160,7 @@ class NovareConfig:
                 # 多渠道配置
                 if isinstance(data, dict) and "channels" in data:
                     cfg.channels = data["channels"]
-                    cfg.channels_enabled = any(
-                        ch.get("enabled", False) for ch in cfg.channels.values() if isinstance(ch, dict)
-                    )
+                    cfg.channels_enabled = _any_channel_enabled(cfg.channels)
             except (json.JSONDecodeError, OSError):
                 pass  # 配置文件损坏时使用默认值
 
