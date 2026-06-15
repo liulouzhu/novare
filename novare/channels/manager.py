@@ -80,7 +80,9 @@ class ChannelManager:
                     instance_name = key
 
                 # 将 instance_id 注入 config，供渠道区分状态目录
-                cfg["instance_id"] = instance_id or key
+                # 单实例且无显式 instance_id 时不注入（避免 weixin_weixin 这样的冗余路径）
+                if instance_id:
+                    cfg["instance_id"] = instance_id
 
                 try:
                     channel = cls(cfg, self.bus)
