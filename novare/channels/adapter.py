@@ -14,6 +14,7 @@ from typing import Any
 
 from novare.channels.bus import MessageBus
 from novare.channels.events import InboundMessage, OutboundMessage
+from novare.config import get_user_workspace
 
 logger = logging.getLogger("novare.channels.adapter")
 
@@ -105,6 +106,24 @@ class AgentAdapter:
             except Exception:
                 pass
 
+    def _build_tool_context(self, user_id: str | None) -> dict | None:
+        """构建传给 agent.run_turn 的 tool_context。
+
+        优先使用 agent_service._workspace_for(user_id)（一致于 Web 路径），
+        若该方法不可用则退回 novare.config.get_user_workspace(user_id)。
+        无 user_id 时返回 None（保持兼容）。
+        """
+        if not user_id:
+            return None
+        ws_path = None
+        try:
+            ws_path = self.agent_service._workspace_for(user_id)
+        except AttributeError:
+            ws_path = None
+        if ws_path is None:
+            ws_path = get_user_workspace(user_id)
+        return {"user_id": user_id, "workspace": str(ws_path)}
+
     async def _run_with_streaming(
         self,
         msg: InboundMessage,
@@ -129,7 +148,7 @@ class AgentAdapter:
                     metadata={"_progress": True, "_tool_hint": True},
                 ))
 
-        ctx = {"user_id": user_id} if user_id else None
+        ctx = self._build_tool_context(user_id)
         await self.agent_service.agent.run_turn(
             session,
             msg.content,
@@ -167,7 +186,7 @@ class AgentAdapter:
             # 非流式模式下，可选发送工具调用提示
             pass
 
-        ctx = {"user_id": user_id} if user_id else None
+        ctx = self._build_tool_context(user_id)
         await self.agent_service.agent.run_turn(
             session,
             msg.content,
