@@ -292,3 +292,20 @@ export async function togglePin(id: number): Promise<MemoryItem> {
   if (!res.ok) { handleAuthError(res); throw new Error('Failed to toggle pin') }
   return res.json()
 }
+
+// ── 任务取消 / 状态查询 ─────────────────────────────────────────────────────
+
+export async function cancelTask(sessionId: string): Promise<{ ok: boolean; reason?: string }> {
+  const res = await fetch(`${BASE}/api/chat/${sessionId}/cancel`, {
+    method: 'POST',
+    headers: authHeaders(),
+  })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to cancel task') }
+  return res.json()
+}
+
+export async function getTaskStatus(sessionId: string): Promise<{ status: string; [key: string]: unknown }> {
+  const res = await fetch(`${BASE}/api/chat/${sessionId}/task`, { headers: authHeaders() })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to get task status') }
+  return res.json()
+}

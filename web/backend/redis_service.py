@@ -91,6 +91,24 @@ class RedisService:
             self._available = False
             return None
 
+    async def set(self, key: str, value: str, ttl: int | None = None) -> bool:
+        """SET key value — 通用写入，可选 TTL。
+
+        Returns True 设置成功，False Redis 不可用或操作异常。
+        """
+        if not self.is_available or self._client is None:
+            return False
+        try:
+            if ttl is not None:
+                await self._client.set(key, value, ex=ttl)
+            else:
+                await self._client.set(key, value)
+            return True
+        except Exception:
+            logger.warning("Redis set failed for key=%s", key, exc_info=True)
+            self._available = False
+            return False
+
     async def delete(self, key: str) -> None:
         """DEL key — Redis 不可用时静默跳过。"""
         if not self.is_available or self._client is None:
@@ -132,6 +150,52 @@ class RedisService:
         try:
             return await self._client.ping()
         except Exception:
+            self._available = False
+            return False
+
+    async def set_json(self, key: str, value: dict, ttl: int | None = None) -> bool:
+        """SET key JSON — 存储小状态对象。
+
+        Returns True 设置成功，False Redis 不可用或序列化失败。
+        """
+        if not self.is_available or self._client is None:
+            return False
+        try:
+            import json
+            data = json.dumps(value, ensure_ascii=False)
+            if ttl is not None:
+                await self._client.set(key, data, ex=ttl)
+            else:
+                await self._client.set(key, data)
+            return True
+        except Exception:
+            logger.warning("Redis set_json failed for key=%s", key, exc_info=True)
+            self._available = False
+            return False
+
+    async def get_json(self, key: str) -> dict | None:
+        """GET key → JSON 解码 — key 不存在或 decode 失败返回 None。"""
+        if not self.is_available or self._client is None:
+            return None
+        try:
+            raw = await self._client.get(key)
+            if raw is None:
+                return None
+            import json
+            return json.loads(raw)
+        except Exception:
+            logger.warning("Redis get_json failed for key=%s", key, exc_info=True)
+            self._available = False
+            return None
+
+    async def expire(self, key: str, ttl: int) -> bool:
+        """EXPIRE key ttl — 续期。Redis 不可用返回 False。"""
+        if not self.is_available or self._client is None:
+            return False
+        try:
+            return bool(await self._client.expire(key, ttl))
+        except Exception:
+            logger.warning("Redis expire failed for key=%s", key, exc_info=True)
             self._available = False
             return False
 

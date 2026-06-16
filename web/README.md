@@ -86,3 +86,29 @@ bash start.sh
 ### WebSocket 连接失败
 
 确认前后端端口配置一致，浏览器控制台查看 WS 连接地址是否为 `ws://localhost:5173/ws/chat/{session_id}`。
+
+---
+
+## Redis（可选依赖）
+
+Redis 用于以下功能，**不启用时系统照常运行**（降级模式）：
+
+| 功能 | Redis 可用时 | Redis 不可用时 |
+|------|-------------|---------------|
+| 会话并发锁 | 同一用户同一会话不会重入 | 无锁，可能重入 |
+| 渠道消息去重 | 自动跳过重复投递 | 无去重，可能重复处理 |
+| 任务状态查询 | `GET /api/chat/{id}/task` 返回实时状态 | 返回 `{"status":"idle"}` |
+| 取消任务 | `POST /api/chat/{id}/cancel` 协作式取消 | 503 或降级为强杀 |
+
+### 启用 Redis
+
+```bash
+# .env 中添加
+NOVARE_REDIS_ENABLED=true
+NOVARE_REDIS_URL=redis://localhost:6379/0
+```
+
+本地开发可用 Docker 快速启动 Redis：
+```bash
+docker run -d --name novare-redis -p 6379:6379 redis:7-alpine redis-server --appendonly yes
+```

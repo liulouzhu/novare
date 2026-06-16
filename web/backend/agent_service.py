@@ -295,6 +295,42 @@ class AgentService:
                 return ""
             _lock_acquired = acquired is True
 
+        # ── 任务状态 + 协作式取消 ──
+        task_key: str | None = None
+        cancel_key: str | None = None
+        task_ttl: int = max(3600, (self.config.turn_timeout if self.config else 300) + 300)
+        _cancelled: bool = False
+        _status_tasks: list[asyncio.Task] = []
+        task_started_at: str = ""
+
+        if user_id and redis_service.is_available:
+            task_key = f"task:user:{user_id}:session:{session.session_id}"
+            cancel_key = f"cancel:user:{user_id}:session:{session.session_id}"
+            # 清理旧 cancel key，写入 running 状态
+            await redis_service.delete(cancel_key)
+            from datetime import datetime, timezone
+            task_started_at = datetime.now(timezone.utc).isoformat()
+            await redis_service.set_json(task_key, {
+                "user_id": user_id,
+                "session_id": session.session_id,
+                "status": "running",
+                "started_at": task_started_at,
+                "updated_at": task_started_at,
+                "current_step": "",
+                "last_tool": "",
+                "error": None,
+            }, ttl=task_ttl)
+
+        async def _check_cancel() -> bool:
+            """检查 Redis cancel key，供 AgentLoop 协作式取消。"""
+            nonlocal _cancelled
+            if not (cancel_key and redis_service.is_available):
+                return False
+            if (await redis_service.get(cancel_key)) is not None:
+                _cancelled = True
+                return True
+            return False
+
         def on_text(chunk: str):
             # 区分 reasoning 和 content 通过前缀标记（来自 llm_client）
             queue.put_nowait({"type": "text_delta", "content": chunk})
@@ -306,6 +342,20 @@ class AgentService:
                     "tool": name,
                     "params": args,
                 })
+                # 更新任务状态（异步写 Redis，不阻塞回调；在 terminal 状态前 gather 确保顺序）
+                if task_key and redis_service.is_available:
+                    _now = datetime.now(timezone.utc).isoformat()
+                    _t = asyncio.create_task(redis_service.set_json(task_key, {
+                        "user_id": user_id or "",
+                        "session_id": session.session_id,
+                        "status": "running",
+                        "started_at": task_started_at,
+                        "updated_at": _now,
+                        "current_step": f"calling {name}",
+                        "last_tool": name,
+                        "error": None,
+                    }, ttl=task_ttl))
+                    _status_tasks.append(_t)
             elif event in ("end", "error"):
                 parsed = parse_tool_result(result or "")
                 # data_preview：结构化 data（前端展开用），JSON 工具直接取，旧格式为 None
@@ -364,7 +414,29 @@ class AgentService:
                 system_prompt=turn_system_prompt,
                 autosave=False,
                 on_compact=_on_compact,
+                should_cancel=_check_cancel if cancel_key else None,
             )
+
+            # ── 协作式取消检测 ──
+            if _cancelled:
+                if _status_tasks:
+                    await asyncio.gather(*_status_tasks, return_exceptions=True)
+                    _status_tasks.clear()
+                if task_key and redis_service.is_available:
+                    _now = datetime.now(timezone.utc).isoformat()
+                    await redis_service.set_json(task_key, {
+                        "user_id": user_id or "",
+                        "session_id": session.session_id,
+                        "status": "cancelled",
+                        "started_at": task_started_at,
+                        "updated_at": _now,
+                        "current_step": "",
+                        "last_tool": "",
+                        "error": None,
+                    }, ttl=task_ttl)
+                await queue.put({"type": "cancelled", "message": "任务已取消"})
+                await queue.put({"type": "done"})
+                return result
 
             # ── 持久化到 PostgreSQL（仅当 user_id 存在时） ──
             if user_id:
@@ -407,6 +479,25 @@ class AgentService:
 
             # ── Web 模式不写 JSONL，DB 是唯一持久化来源 ──
 
+            # ── 等待异步 tool 状态更新完成，避免 terminal 状态被覆盖 ──
+            if _status_tasks:
+                await asyncio.gather(*_status_tasks, return_exceptions=True)
+                _status_tasks.clear()
+
+            # ── 写任务完成状态 ──
+            if task_key and redis_service.is_available:
+                _now = datetime.now(timezone.utc).isoformat()
+                await redis_service.set_json(task_key, {
+                    "user_id": user_id or "",
+                    "session_id": session.session_id,
+                    "status": "done",
+                    "started_at": task_started_at,
+                    "updated_at": _now,
+                    "current_step": "",
+                    "last_tool": "",
+                    "error": None,
+                }, ttl=task_ttl)
+
             # ── 先通知客户端完成，记忆提取放后台不阻塞 ──
             await queue.put({"type": "done"})
 
@@ -437,6 +528,22 @@ class AgentService:
                 error_msg = "LLM API 响应超时，请稍后重试（可能是模型处理时间过长）"
             elif "ConnectError" in type(e).__name__ or "Connect" in error_msg:
                 error_msg = "无法连接到 LLM API，请检查网络和 API 配置"
+            # 写错误状态
+            if _status_tasks:
+                await asyncio.gather(*_status_tasks, return_exceptions=True)
+                _status_tasks.clear()
+            if task_key and redis_service.is_available:
+                _now = datetime.now(timezone.utc).isoformat()
+                await redis_service.set_json(task_key, {
+                    "user_id": user_id or "",
+                    "session_id": session.session_id,
+                    "status": "error",
+                    "started_at": task_started_at,
+                    "updated_at": _now,
+                    "current_step": "",
+                    "last_tool": "",
+                    "error": error_msg,
+                }, ttl=task_ttl)
             await queue.put({"type": "error", "message": error_msg})
             return ""
         finally:

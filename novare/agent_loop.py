@@ -75,17 +75,19 @@ class AgentLoop:
         system_prompt: str | None = None,
         autosave: bool = True,
         on_compact: Callable[[object], Awaitable[None] | None] | None = None,
+        should_cancel: Callable[[], Awaitable[bool] | bool] | None = None,
     ) -> str:
         """执行一轮对话，带 per-turn 超时保护。
 
         system_prompt: 可选的 per-turn 覆盖，不传则使用 self.system_prompt。
         autosave: compact 后是否自动 session.save() 写 JSONL。CLI 默认 True，Web 应传 False。
         on_compact: compact 发生后的回调，上层可用于持久化 compact 后的消息（如写 DB）。
+        should_cancel: 可选的协作式取消回调，每轮迭代和工具调用前检查。返回 True 时优雅停止。
         超时时返回友好提示，已执行的工具调用和消息保留在 session 中。
         """
         try:
             return await asyncio.wait_for(
-                self._run_turn_core(session, user_input, on_text, on_tool, tool_context, on_task_state, system_prompt, autosave, on_compact),
+                self._run_turn_core(session, user_input, on_text, on_tool, tool_context, on_task_state, system_prompt, autosave, on_compact, should_cancel),
                 timeout=self.turn_timeout,
             )
         except asyncio.TimeoutError:
@@ -103,6 +105,7 @@ class AgentLoop:
         system_prompt: str | None = None,
         autosave: bool = True,
         on_compact: Callable[[object], Awaitable[None] | None] | None = None,
+        should_cancel: Callable[[], Awaitable[bool] | bool] | None = None,
     ) -> str:
         """执行一轮对话的核心逻辑：用户输入 → LLM（流式） → 工具循环 → 最终回答
 
@@ -131,6 +134,14 @@ class AgentLoop:
             session.add_user_message(user_input)
 
             for iteration in range(self.max_iterations):
+                # 协作式取消检查：每次迭代开始前
+                if should_cancel:
+                    _cancel_result = should_cancel()
+                    if asyncio.iscoroutine(_cancel_result):
+                        _cancel_result = await _cancel_result
+                    if _cancel_result:
+                        return "任务已取消。"
+
                 # 构建消息（注入当前 task state，可能已被压缩）
                 messages = self._build_messages(session, task_state=task_mgr.state, system_prompt=effective_prompt)
 
@@ -169,6 +180,14 @@ class AgentLoop:
 
                 # 执行每个工具调用
                 for tc in response.tool_calls:
+                    # 协作式取消检查：每次工具调用前
+                    if should_cancel:
+                        _cancel_result = should_cancel()
+                        if asyncio.iscoroutine(_cancel_result):
+                            _cancel_result = await _cancel_result
+                        if _cancel_result:
+                            return "任务已取消。"
+
                     logger.info("Tool call: %s(%s)", tc.name, tc.arguments)
                     if on_tool:
                         on_tool("start", tc.name, tc.arguments, None, None)

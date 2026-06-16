@@ -1,4 +1,4 @@
-"""WebSocket 聊天端点"""
+"""WebSocket 聊天端点 + 任务取消/状态 HTTP 接口"""
 
 from __future__ import annotations
 
@@ -6,11 +6,13 @@ import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
-from web.backend.app import agent_service
+from web.backend.auth.dependencies import get_current_user
 from web.backend.auth.service import decode_access_token
 from web.backend.db.base import SessionLocal
+from web.backend.db.models import User
+from web.backend.redis_service import redis_service
 from web.backend.repositories import SessionRepository
 
 logger = logging.getLogger("novare.web.chat")
@@ -63,10 +65,14 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
     await websocket.accept()
     logger.info("WebSocket connected: session=%s user=%s", session_id, user_id_str)
 
+    from web.backend.app import agent_service
     session = agent_service.load_session(session_id, user_id=user_id_str)
     queue: asyncio.Queue = asyncio.Queue()
     current_task: asyncio.Task | None = None
     stopped = False
+
+    # 任务状态 TTL（与 AgentService 保持一致）
+    task_ttl = max(3600, (agent_service.config.turn_timeout if agent_service.config else 300) + 300)
 
     async def recv_messages():
         """监听 WebSocket 收到的消息，转发到 queue 供主循环处理"""
@@ -83,10 +89,17 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
                 msg_type = data.get("type", "send")
 
                 if msg_type == "stop":
-                    stopped = True
-                    if current_task and not current_task.done():
-                        current_task.cancel()
-                        logger.info("Agent task cancelled by user: session=%s", session_id)
+                    # 优先通过 Redis cancel key 协作式取消
+                    if redis_service.is_available:
+                        cancel_key = f"cancel:user:{user_id_str}:session:{session_id}"
+                        await redis_service.set(cancel_key, "1", ttl=task_ttl)
+                        # 不设 stopped — 让事件转发循环继续，等待 AgentService 发回 cancelled + done
+                    else:
+                        # Redis 不可用时降级：强杀 task + 丢弃后续事件
+                        stopped = True
+                        if current_task and not current_task.done():
+                            current_task.cancel()
+                            logger.info("Agent task force-cancelled (no Redis): session=%s", session_id)
                     continue
 
                 # 将消息放入 queue 由主循环处理
@@ -161,3 +174,30 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
             current_task.cancel()
         if not recv_task.done():
             recv_task.cancel()
+
+
+# ── HTTP 接口：取消任务 / 查询任务状态 ──────────────────────────────────────
+
+
+@router.post("/api/chat/{session_id}/cancel")
+async def cancel_task(session_id: str, user: User = Depends(get_current_user)):
+    """协作式取消：写入 Redis cancel key，AgentLoop 在下个检查点优雅停止。"""
+    if not redis_service.is_available:
+        return {"ok": False, "reason": "redis_unavailable"}
+    from web.backend.app import agent_service
+    cancel_key = f"cancel:user:{user.id}:session:{session_id}"
+    task_ttl = max(3600, (agent_service.config.turn_timeout if agent_service.config else 300) + 300)
+    await redis_service.set(cancel_key, "1", ttl=task_ttl)
+    return {"ok": True}
+
+
+@router.get("/api/chat/{session_id}/task")
+async def get_task_status(session_id: str, user: User = Depends(get_current_user)):
+    """查询当前任务状态。无任务或 Redis 不可用时返回 idle。"""
+    if not redis_service.is_available:
+        return {"status": "idle"}
+    task_key = f"task:user:{user.id}:session:{session_id}"
+    state = await redis_service.get_json(task_key)
+    if state is None:
+        return {"status": "idle"}
+    return state

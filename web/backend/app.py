@@ -165,7 +165,38 @@ app.include_router(memories_router)
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "model": agent_service.config.model if agent_service.config else "not ready"}
+    result: dict = {
+        "status": "ok",
+        "model": agent_service.config.model if agent_service.config else "not ready",
+        "redis": {"enabled": False, "available": False, "status": "disabled"},
+        "database": {"status": "ok"},
+        "sandbox": {"available": sandbox_manager.client is not None},
+    }
+    try:
+        # Redis 子检查
+        if redis_service._enabled:
+            result["redis"]["enabled"] = True
+            result["redis"]["available"] = redis_service.is_available
+            try:
+                pong = await redis_service.ping()
+                result["redis"]["status"] = "ok" if pong else "unavailable"
+            except Exception:
+                result["redis"]["status"] = "unavailable"
+
+        # DB 子检查
+        try:
+            db = SessionLocal()
+            try:
+                from sqlalchemy import text
+                db.execute(text("SELECT 1"))
+            finally:
+                db.close()
+        except Exception:
+            result["database"]["status"] = "error"
+    except Exception:
+        # 整个 health 不能 500
+        pass
+    return result
 
 
 @app.get("/api/skills")
