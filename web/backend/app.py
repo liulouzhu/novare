@@ -71,6 +71,15 @@ async def lifespan(app: FastAPI):
                 enabled=agent_service.config.redis_enabled,
                 url=agent_service.config.redis_url,
             )
+            redis_status = "disabled"
+            if agent_service.config.redis_enabled:
+                redis_status = "ok" if redis_service.is_available else "unavailable"
+            web_logger.info(
+                "Redis health: enabled=%s available=%s status=%s",
+                agent_service.config.redis_enabled,
+                redis_service.is_available,
+                redis_status,
+            )
         except Exception:
             web_logger.warning("Redis init failed (non-fatal), continuing without Redis", exc_info=True)
 

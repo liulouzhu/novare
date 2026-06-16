@@ -127,7 +127,7 @@ export function ToolCallCard({ toolCall }: Props) {
               <ul className="text-xs space-y-0.5">
                 {toolCall.sources.map((s, i) => (
                   <li key={i} style={{ color: 'var(--text-secondary)' }}>
-                    • {s.title || s.id || JSON.stringify(s)}
+                    • {String(s.title || s.id || JSON.stringify(s))}
                   </li>
                 ))}
               </ul>

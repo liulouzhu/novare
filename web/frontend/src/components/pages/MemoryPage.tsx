@@ -266,7 +266,6 @@ export function MemoryPage() {
                           borderColor: 'var(--border-color)',
                           backgroundColor: 'var(--bg-primary)',
                           color: 'var(--text-primary)',
-                          focusRingColor: 'var(--border-focus)',
                         }}
                       />
                       <div className="flex items-center gap-3">

@@ -6,7 +6,7 @@ import { useChatStore } from '@/stores/chatStore'
 import { useSessionStore } from '@/stores/sessionStore'
 import { type ServerEvent, type ToolCallState, type TaskState, type Message, type MessagePart } from '@/lib/ws'
 import { generateId } from '@/lib/utils'
-import { fetchSession } from '@/lib/api'
+import { cancelTask, fetchSession } from '@/lib/api'
 
 /** 将后端 OpenAI 格式的消息转为前端 Message 格式 */
 function convertBackendMessages(raw: Array<{ role: string; content: string; tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>; tool_call_id?: string }>): Message[] {
@@ -110,6 +110,7 @@ export function useChat(sessionId: string) {
 
   const assistantMsgId = useRef<string | null>(null)
   const toolCounter = useRef(0)
+  const stoppingRef = useRef(false)
 
   // 加载历史消息
   useEffect(() => {
@@ -196,8 +197,20 @@ export function useChat(sessionId: string) {
           finishMessage(assistantMsgId.current)
           assistantMsgId.current = null
         }
+        stoppingRef.current = false
         setStreaming(false)
         // 刷新会话列表（新会话可能有了消息）
+        useSessionStore.getState().loadSessions()
+        break
+
+      case 'cancelled':
+        if (assistantMsgId.current) {
+          appendText(assistantMsgId.current, `\n\n${event.message}`)
+          finishMessage(assistantMsgId.current)
+          assistantMsgId.current = null
+        }
+        stoppingRef.current = false
+        setStreaming(false)
         useSessionStore.getState().loadSessions()
         break
 
@@ -207,6 +220,7 @@ export function useChat(sessionId: string) {
           finishMessage(assistantMsgId.current)
           assistantMsgId.current = null
         }
+        stoppingRef.current = false
         setStreaming(false)
         useSessionStore.getState().loadSessions()
         break
@@ -225,6 +239,7 @@ export function useChat(sessionId: string) {
     // 创建 assistant 消息占位
     assistantMsgId.current = startAssistantMessage(sessionId)
     toolCounter.current = 0
+    stoppingRef.current = false
     setStreaming(true)
 
     // 发送 WebSocket 消息
@@ -235,20 +250,23 @@ export function useChat(sessionId: string) {
     }
   }, [sessionId, isStreaming, addUserMessage, startAssistantMessage, setStreaming, sendMessage])
 
-  const stop = useCallback(() => {
-    if (!isStreaming) return
+  const stop = useCallback(async () => {
+    if (!isStreaming || stoppingRef.current) return
+    stoppingRef.current = true
 
-    // 通知后端停止
-    sendMessage({ type: 'stop' })
-
-    // 在当前 assistant 消息上追加停止提示
     if (assistantMsgId.current) {
-      appendText(assistantMsgId.current, '\n\n⏹ 已停止')
-      finishMessage(assistantMsgId.current)
-      assistantMsgId.current = null
+      appendText(assistantMsgId.current, '\n\n正在停止...')
     }
-    setStreaming(false)
-  }, [isStreaming, sendMessage, appendText, finishMessage, setStreaming])
+
+    try {
+      const result = await cancelTask(sessionId)
+      if (!result.ok) {
+        sendMessage({ type: 'stop' })
+      }
+    } catch {
+      sendMessage({ type: 'stop' })
+    }
+  }, [sessionId, isStreaming, sendMessage, appendText])
 
   return {
     messages: getMessages(sessionId),

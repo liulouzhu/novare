@@ -37,6 +37,28 @@ export interface SessionDetail {
   title: string
 }
 
+export interface HealthStatus {
+  status: string
+  model: string
+  redis: {
+    enabled: boolean
+    available: boolean
+    status: string
+  }
+  database: {
+    status: string
+  }
+  sandbox: {
+    available: boolean
+  }
+}
+
+export async function fetchHealth(): Promise<HealthStatus> {
+  const res = await fetch(`${BASE}/api/health`)
+  if (!res.ok) throw new Error('Failed to fetch health')
+  return res.json()
+}
+
 export interface Paper {
   id: string
   title: string

@@ -18,6 +18,7 @@ export type ServerEvent =
   | { type: 'tool_end'; tool: string; ok: boolean; summary: string; result: string; data_preview: unknown; warnings: string[]; sources: Array<Record<string, unknown>>; duration: number }
   | { type: 'tool_error'; tool: string; ok: boolean; summary: string; error: string; data_preview: unknown; warnings: string[] }
   | { type: 'task_state'; goal: string; completed: string[]; pending: string[]; tools_used: string[]; key_findings: string[]; missing_info: string[] }
+  | { type: 'cancelled'; message: string }
   | { type: 'done'; usage?: Record<string, number> }
   | { type: 'error'; message: string }
 

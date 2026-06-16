@@ -4,6 +4,7 @@ import { LoginPage } from './components/auth/LoginPage'
 import { RegisterPage } from './components/auth/RegisterPage'
 import { useThemeStore } from './stores/themeStore'
 import { useAuthStore } from './stores/authStore'
+import { fetchHealth } from './lib/api'
 
 type AuthPage = 'login' | 'register'
 
@@ -15,6 +16,18 @@ export default function App() {
   // 初始化主题
   useEffect(() => {
     useThemeStore.getState().setTheme(useThemeStore.getState().theme)
+  }, [])
+
+  useEffect(() => {
+    fetchHealth()
+      .then((health) => {
+        console.info(
+          `[Novare health] redis=${health.redis.status} enabled=${health.redis.enabled} available=${health.redis.available}`,
+        )
+      })
+      .catch((err) => {
+        console.warn('[Novare health] unavailable', err)
+      })
   }, [])
 
   if (!isAuthenticated) {
