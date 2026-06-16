@@ -7,13 +7,12 @@ import json
 import logging
 import sys
 from pathlib import Path
+from uuid import UUID, uuid4
 
 # 将项目根目录加入 sys.path，以便 import novare / mcp-server 模块
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from uuid import UUID
 
 from novare.agent_loop import AgentLoop  # noqa: E402
 from novare.config import NovareConfig, get_user_workspace  # noqa: E402
@@ -27,6 +26,7 @@ from novare.subagents.tools import register_subagent_tools  # noqa: E402
 from web.backend.db.base import SessionLocal  # noqa: E402
 from web.backend.repositories import SessionRepository, MessageRepository  # noqa: E402
 from web.backend.memory_service import MemoryServiceAsync  # noqa: E402
+from web.backend.redis_service import redis_service  # noqa: E402
 
 logger = logging.getLogger("novare.web")
 
@@ -280,6 +280,21 @@ class AgentService:
             {"type": "tool_error", "tool": "...", "error": "..."}
             {"type": "done"}
         """
+        # ── Redis 并发锁：防止同一会话重入 ──
+        lock_key: str | None = None
+        lock_token: str | None = None
+        _lock_acquired: bool = False
+        if user_id and redis_service.is_available:
+            lock_key = f"lock:user:{user_id}:session:{session.session_id}"
+            lock_token = str(uuid4())
+            ttl = max(60, (self.config.turn_timeout if self.config else 300) + 30)
+            acquired = await redis_service.set_nx(lock_key, lock_token, ttl)
+            if acquired is False:
+                await queue.put({"type": "error", "message": "当前会话已有任务正在运行，请稍后再试"})
+                await queue.put({"type": "done"})
+                return ""
+            _lock_acquired = acquired is True
+
         def on_text(chunk: str):
             # 区分 reasoning 和 content 通过前缀标记（来自 llm_client）
             queue.put_nowait({"type": "text_delta", "content": chunk})
@@ -424,6 +439,14 @@ class AgentService:
                 error_msg = "无法连接到 LLM API，请检查网络和 API 配置"
             await queue.put({"type": "error", "message": error_msg})
             return ""
+        finally:
+            # ── 释放 Redis 并发锁 ──
+            # 仅当真正获得锁后才释放；使用 compare-and-delete 避免误删他人续期/重建的同 key 锁
+            if _lock_acquired and lock_key and lock_token:
+                try:
+                    await redis_service.delete_if_value(lock_key, lock_token)
+                except Exception:
+                    logger.warning("Failed to release Redis lock key=%s", lock_key)
 
 
 def _make_mcp_handler(client: McpClient, tool_name: str):

@@ -9,12 +9,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from typing import Any
 
 from novare.channels.bus import MessageBus
 from novare.channels.events import InboundMessage, OutboundMessage
 from novare.config import get_user_workspace
+from web.backend.redis_service import redis_service
 
 logger = logging.getLogger("novare.channels.adapter")
 
@@ -75,6 +77,15 @@ class AgentAdapter:
     async def _handle_one(self, msg: InboundMessage) -> None:
         """处理单条入站消息。"""
         try:
+            # ── Redis 消息去重：防止渠道重复投递触发多次 agent 调用 ──
+            if redis_service.is_available:
+                dedupe_key = self._build_dedupe_key(msg)
+                if dedupe_key:
+                    is_new = await redis_service.set_nx(dedupe_key, "1", ttl=3600)
+                    if is_new is False:
+                        logger.debug("Duplicate channel message skipped: %s", dedupe_key)
+                        return
+
             # 1. 解析用户和会话
             user_id = await self._resolve_user(msg.sender_id, msg.channel)
             session = self.agent_service.load_session(
@@ -123,6 +134,20 @@ class AgentAdapter:
         if ws_path is None:
             ws_path = get_user_workspace(user_id)
         return {"user_id": user_id, "workspace": str(ws_path)}
+
+    @staticmethod
+    def _build_dedupe_key(msg: InboundMessage) -> str | None:
+        """构造去重 key。优先使用 metadata 中的稳定 message_id。"""
+        # 优先从 metadata 取稳定的 message_id
+        meta = msg.metadata
+        for field in ("message_id", "msg_id", "id"):
+            mid = meta.get(field)
+            if mid:
+                return f"dedupe:channel:{msg.channel}:{mid}"
+
+        # 退化为 sender + session + content hash
+        content_hash = hashlib.md5(msg.content.encode("utf-8")).hexdigest()[:12]
+        return f"dedupe:channel:{msg.channel}:{msg.sender_id}:{msg.session_key}:{content_hash}"
 
     async def _run_with_streaming(
         self,

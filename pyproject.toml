@@ -24,6 +24,8 @@ dependencies = [
     # 多渠道接入依赖
     "pycryptodome>=3.20",   # WeChat AES 加解密
     "qrcode>=7.0",          # WeChat QR 码终端显示
+    # Redis（可选，分布式锁 / 消息去重）
+    "redis>=5",
 ]
 
 [project.optional-dependencies]

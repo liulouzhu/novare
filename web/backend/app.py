@@ -22,6 +22,7 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from web.backend.agent_service import AgentService  # noqa: E402
 from web.backend.db.base import Base, SessionLocal, engine  # noqa: E402
+from web.backend.redis_service import redis_service  # noqa: E402
 from web.backend.sandbox.manager import (  # noqa: E402
     IDLE_TIMEOUT,
     sandbox_manager,
@@ -62,6 +63,16 @@ async def lifespan(app: FastAPI):
     web_logger.info("Sandbox idle cleanup task started (interval=%ds)", max(60, IDLE_TIMEOUT // 4))
 
     await agent_service.initialize()
+
+    # ── Redis 初始化（可选，失败不阻止启动） ──
+    if agent_service.config:
+        try:
+            await redis_service.initialize(
+                enabled=agent_service.config.redis_enabled,
+                url=agent_service.config.redis_url,
+            )
+        except Exception:
+            web_logger.warning("Redis init failed (non-fatal), continuing without Redis", exc_info=True)
 
     # ── 多渠道接入系统 ──
     channel_tasks: list[asyncio.Task] = []
@@ -108,6 +119,9 @@ async def lifespan(app: FastAPI):
                     await t
                 except asyncio.CancelledError:
                     pass
+
+        # 关闭 Redis 连接
+        await redis_service.close()
 
         try:
             await agent_service.shutdown()

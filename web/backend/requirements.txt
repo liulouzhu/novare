@@ -9,3 +9,4 @@ bcrypt
 pydantic[email]
 alembic>=1.13
 docker>=7.0
+redis>=5

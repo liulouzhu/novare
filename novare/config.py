@@ -64,6 +64,10 @@ class NovareConfig:
     channels: dict[str, dict] = field(default_factory=dict)  # 渠道配置，如 {"weixin": {"enabled": True, ...}}
     channel_default_user_id: str = ""           # 渠道消息的默认用户 ID（留空则使用匿名 workspace）
 
+    # Redis（可选，用于分布式锁 / 消息去重等）
+    redis_enabled: bool = False
+    redis_url: str = "redis://localhost:6379/0"
+
     # 超时（秒）
     turn_timeout: int = 300                 # 主 agent 单轮超时（默认 5 分钟）
     subagent_turn_timeout: int = 600        # 子智能体单轮超时（默认 10 分钟）
@@ -113,6 +117,14 @@ class NovareConfig:
         proxy = os.environ.get("NOVARE_PROXY")
         if proxy:
             cfg.proxy = proxy
+
+        # Redis（可选）
+        redis_enabled = os.environ.get("NOVARE_REDIS_ENABLED")
+        if redis_enabled is not None:
+            cfg.redis_enabled = redis_enabled.lower() in ("1", "true", "yes")
+        redis_url = os.environ.get("NOVARE_REDIS_URL")
+        if redis_url:
+            cfg.redis_url = redis_url
 
         # 多渠道（环境变量覆盖）
         channels_enabled = os.environ.get("NOVARE_CHANNELS_ENABLED")
