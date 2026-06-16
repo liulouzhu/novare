@@ -1,4 +1,7 @@
-"""论文检索工具 - 并行查询 Semantic Scholar + arXiv"""
+"""论文检索工具 - 并行查询 Semantic Scholar + arXiv
+
+Redis 缓存：相同查询在 TTL 内直接返回缓存结果，按 user_id 隔离。
+"""
 
 import asyncio
 import logging
@@ -11,7 +14,18 @@ import httpx
 from core.database import get_connection, upsert_paper
 from tools.result import ok, fail, truncate, MAX_ABSTRACT
 
+# 缓存 helper（纯计算，无 Redis 依赖）
+from novare.cache import make_cache_key, cacheable_size
+
+# Redis 访问（MCP server 进程可能没有 web.backend，安全降级）
+try:
+    from web.backend.redis_service import redis_service
+except Exception:
+    redis_service = None
+
 logger = logging.getLogger("research-server.paper_search")
+
+_CACHE_TTL = 1800  # 30 分钟
 
 # Semantic Scholar API
 S2_API = "https://api.semanticscholar.org/graph/v1/paper/search"
@@ -274,7 +288,7 @@ def _build_paper_json(paper: dict) -> dict:
 
 
 async def handle_paper_search(args: dict, user_id: str = None) -> str:
-    """论文检索入口 — 返回统一 JSON 格式"""
+    """论文检索入口 — 返回统一 JSON 格式（带 Redis 缓存）"""
     query = args.get("query", "").strip()
     if not query:
         return fail("paper_search", "请提供搜索关键词。")
@@ -283,6 +297,22 @@ async def handle_paper_search(args: dict, user_id: str = None) -> str:
     year_to = args.get("year_to")
     limit = min(args.get("limit", 10), 20)
 
+    # ── Redis 缓存：尝试命中 ──
+    _rs = redis_service
+    cache_key = make_cache_key("paper_search", user_id, {
+        "query": query, "limit": limit,
+        "year_from": year_from, "year_to": year_to,
+    })
+    if cache_key and _rs and _rs.is_available:
+        try:
+            cached = await _rs.get_json(cache_key)
+            if cached and isinstance(cached, dict) and "result" in cached:
+                logger.info("paper_search cache hit: %s", cache_key)
+                return cached["result"]
+        except Exception:
+            logger.debug("cache read failed (non-fatal)", exc_info=True)
+
+    # ── 原始搜索逻辑 ──
     # 并行查询两个源
     s2_task = _search_semantic_scholar(query, year_from, year_to, limit)
     arxiv_task = _search_arxiv(query, year_from, year_to, limit)
@@ -330,9 +360,10 @@ async def handle_paper_search(args: dict, user_id: str = None) -> str:
     ]
 
     # ── 返回结果 ──
+    result: str
     if merged:
         papers_json = [_build_paper_json(p) for p in merged]
-        return ok(
+        result = ok(
             "paper_search",
             {
                 "query": query,
@@ -344,16 +375,25 @@ async def handle_paper_search(args: dict, user_id: str = None) -> str:
             providers=providers,
             warnings=warnings,
         )
+    else:
+        # 两个源都失败了
+        errors = [e for e in (s2_err, arxiv_err) if e]
+        if errors:
+            return fail("paper_search", f"搜索失败，所有数据源均不可用：{'; '.join(errors)}")
+        result = ok(
+            "paper_search",
+            {"query": query, "total": 0, "papers": []},
+            summary=f"搜索 '{query}' 未找到相关论文",
+            providers=providers,
+            warnings=warnings or ["请尝试不同的搜索词"],
+        )
 
-    # 两个源都失败了
-    errors = [e for e in (s2_err, arxiv_err) if e]
-    if errors:
-        return fail("paper_search", f"搜索失败，所有数据源均不可用：{'; '.join(errors)}")
+    # ── Redis 缓存：写入成功结果 ──
+    if cache_key and _rs and _rs.is_available:
+        try:
+            if cacheable_size(result):
+                await _rs.set_json(cache_key, {"result": result}, ttl=_CACHE_TTL)
+        except Exception:
+            logger.debug("cache write failed (non-fatal)", exc_info=True)
 
-    return ok(
-        "paper_search",
-        {"query": query, "total": 0, "papers": []},
-        summary=f"搜索 '{query}' 未找到相关论文",
-        providers=providers,
-        warnings=warnings or ["请尝试不同的搜索词"],
-    )
+    return result
