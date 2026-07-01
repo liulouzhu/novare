@@ -1,4 +1,7 @@
-"""RAG 语义检索工具 - 在已解析的论文库中进行语义检索"""
+"""RAG 语义检索工具 - 在已解析的论文库中进行语义检索
+
+Redis 缓存：明确作用域的 RAG 查询在 TTL 内直接返回缓存结果，按 user_id 隔离。
+"""
 
 import logging
 import os
@@ -9,7 +12,18 @@ from core.database import get_connection, get_embeddings_by_paper_ids
 from core.embedding import embed_text_async
 from tools.result import ok, fail, truncate, MAX_CHUNK_TEXT
 
+# 缓存 helper（纯计算，无 Redis 依赖）
+from novare.cache import make_cache_key, cacheable_size
+
+# Redis 访问（安全降级）
+try:
+    from web.backend.redis_service import redis_service
+except Exception:
+    redis_service = None
+
 logger = logging.getLogger("research-server.rag_query")
+
+_CACHE_TTL = 600  # 10 分钟
 
 DEFAULT_USER_ID = os.getenv("RAG_DEFAULT_USER", "default")
 ALLOW_UNSCOPED = os.getenv("RAG_ALLOW_UNSCOPED", "").lower() in ("1", "true", "yes")
@@ -127,6 +141,25 @@ def _milvus_search(query_vec: list[float], top_k: int, user_id: str) -> list[dic
     return results
 
 
+# ── 缓存作用域判断 helpers ─────────────────────────────────────────────────
+
+
+def _resolve_paper_ids(args: dict) -> list[str]:
+    """从 args 中提取 paper_id/paper_ids，返回去重排序列表。"""
+    ids: list[str] = []
+    if "paper_id" in args and args["paper_id"]:
+        ids.append(str(args["paper_id"]))
+    if "paper_ids" in args and args["paper_ids"]:
+        ids.extend(str(pid) for pid in args["paper_ids"] if pid)
+    return sorted(set(ids))
+
+
+def _has_explicit_filters(args: dict) -> bool:
+    """判断 args 中是否有明确过滤字段（不含 question/top_k/paper_id/paper_ids）。"""
+    filter_keys = {"filters", "paper_filter", "source", "year_from", "year_to"}
+    return any(k in args and args[k] for k in filter_keys)
+
+
 async def handle_rag_query(args: dict, user_id: str = None) -> str:
     """RAG 语义检索入口 — Milvus 优先，brute-force fallback。返回统一 JSON。
 
@@ -139,6 +172,30 @@ async def handle_rag_query(args: dict, user_id: str = None) -> str:
         return fail("rag_query", "请提供查询问题。")
 
     top_k = args.get("top_k", 5)
+
+    # ── 明确作用域检测 + Redis 缓存命中 ──
+    # 只缓存有明确 paper_id/paper_ids/filter 的查询，不缓存全库搜索
+    _scoped_paper_ids = _resolve_paper_ids(args)
+    _has_filters = _has_explicit_filters(args)
+    _is_scoped = bool(_scoped_paper_ids or _has_filters)
+
+    _rs = redis_service
+    cache_key: str | None = None
+    if _is_scoped and user_id:
+        cache_key = make_cache_key("rag_query", user_id, {
+            "question": question,
+            "top_k": top_k,
+            "paper_ids": sorted(_scoped_paper_ids) if _scoped_paper_ids else [],
+            "filters": {k: args[k] for k in sorted(args) if k not in ("question", "top_k", "paper_id", "paper_ids")},
+        })
+        if cache_key and _rs and _rs.is_available:
+            try:
+                cached = await _rs.get_json(cache_key)
+                if cached and isinstance(cached, dict) and "result" in cached:
+                    logger.info("rag_query cache hit: %s", cache_key)
+                    return cached["result"]
+            except Exception:
+                logger.debug("cache read failed (non-fatal)", exc_info=True)
 
     # ── 权限校验：无 user_id 时默认拒绝 ──
     if not user_id and not ALLOW_UNSCOPED:
@@ -231,7 +288,7 @@ async def handle_rag_query(args: dict, user_id: str = None) -> str:
 
     unique_papers = len(set(r["paper_id"] for r in top_results))
 
-    return ok(
+    result = ok(
         "rag_query",
         {
             "question": question,
@@ -244,3 +301,13 @@ async def handle_rag_query(args: dict, user_id: str = None) -> str:
         sources=sources,
         providers=[search_method],
     )
+
+    # ── Redis 缓存：写入成功结果（仅限明确作用域查询） ──
+    if cache_key and _rs and _rs.is_available:
+        try:
+            if cacheable_size(result):
+                await _rs.set_json(cache_key, {"result": result}, ttl=_CACHE_TTL)
+        except Exception:
+            logger.debug("cache write failed (non-fatal)", exc_info=True)
+
+    return result
