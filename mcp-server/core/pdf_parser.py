@@ -20,6 +20,9 @@ SECTION_PATTERNS = [
 DEFAULT_CHUNK_SIZE = 900
 DEFAULT_CHUNK_OVERLAP = 120
 
+_STRONG_BREAKS = ["\n\n", "\n", "。", "！", "？", ". "]
+_WEAK_BREAKS = ["；", ";", "：", ":", "，", ","]
+
 
 def parse_pdf_to_markdown(pdf_path: str) -> str:
     """将 PDF 转换为 Markdown 格式"""
@@ -140,15 +143,12 @@ def chunk_text(
     while start < len(text):
         end = start + chunk_size
 
-        # 尝试在句号/换行处断开
+        # 优先在句末强边界断开；失败后再退到弱边界，最后才硬切。
         if end < len(text):
-            # 在 chunk_size 范围内找最后的断句点
             search_start = max(start + chunk_size // 2, start)
-            best_break = -1
-            for sep in ["\n\n", "\n", ". ", "。", "；", "; "]:
-                pos = text.rfind(sep, search_start, end)
-                if pos > best_break:
-                    best_break = pos + len(sep)
+            best_break = _find_chunk_break(text, search_start, end, _STRONG_BREAKS)
+            if best_break <= start:
+                best_break = _find_chunk_break(text, search_start, end, _WEAK_BREAKS)
             if best_break > start:
                 end = best_break
 
@@ -159,6 +159,18 @@ def chunk_text(
         start = end - chunk_overlap if end < len(text) else end
 
     return chunks
+
+
+def _find_chunk_break(text: str, start: int, end: int, separators: list[str]) -> int:
+    """在指定窗口内找最靠后的可接受断点。"""
+    best_break = -1
+    for sep in separators:
+        pos = text.rfind(sep, start, end)
+        if pos != -1:
+            candidate = pos + len(sep)
+            if candidate > best_break:
+                best_break = candidate
+    return best_break
 
 
 def extract_references(markdown_text: str) -> list[str]:
