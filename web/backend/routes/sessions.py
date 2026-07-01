@@ -134,13 +134,14 @@ async def delete_session(
     db: Session = Depends(get_db),
 ):
     """删除会话及关联消息"""
-    msg_repo = MessageRepository(db, user.id)
-    msg_repo.delete_by_session(session_id)
-
     session_repo = SessionRepository(db, user.id)
     deleted = session_repo.delete(session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    # session 归属已由 session_repo.delete() 校验，此处安全执行
+    msg_repo = MessageRepository(db, user.id)
+    msg_repo.delete_by_session(session_id)
 
     db.commit()
     return {"ok": True}

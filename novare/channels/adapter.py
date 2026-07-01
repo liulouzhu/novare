@@ -331,7 +331,8 @@ class AgentAdapter:
 
                 msg_repo = MessageRepository(db, user_uuid)
                 # 增量追加（简单实现：全量替换，后续优化为增量）
-                msg_repo.replace_session_messages(session.session_id, session.messages)
+                if not msg_repo.replace_session_messages(session.session_id, session.messages):
+                    logger.warning("replace_session_messages rejected: session %s not owned by user %s", session.session_id, user_id)
                 db.commit()
             except Exception:
                 db.rollback()

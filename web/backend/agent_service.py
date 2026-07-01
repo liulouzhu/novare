@@ -455,7 +455,8 @@ class AgentService:
                         msg_repo = MessageRepository(db, user_uuid)
                         if compacted:
                             # compact 发生后，用完整 session.messages 替换 DB
-                            msg_repo.replace_session_messages(session.session_id, session.messages)
+                            if not msg_repo.replace_session_messages(session.session_id, session.messages):
+                                logger.warning("replace_session_messages rejected: session %s not owned by user %s", session.session_id, user_id)
                         else:
                             # 正常无 compact：增量追加本轮新消息
                             new_messages = session.messages[msgs_before:]
