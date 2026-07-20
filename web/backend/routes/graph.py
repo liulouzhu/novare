@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from web.backend.db.base import get_db
 from web.backend.db.models import User
@@ -20,19 +20,13 @@ router = APIRouter(prefix="/api/graph", tags=["graph"])
 async def get_graph(
     exclude: str = "Author",
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
-    """获取完整知识图谱数据（nodes + edges）
-
-    Query params:
-        exclude: 逗号分隔的节点类型列表，默认 "Author"。
-                 传空字符串 exclude= 可返回所有节点。
-    """
+    """获取完整知识图谱数据（nodes + edges）"""
     repo = KnowledgeRepository(db, user.id)
     exclude_types = [t.strip() for t in exclude.split(",") if t.strip()] if exclude else []
-    data = repo.get_graph_data(exclude_types=exclude_types)
+    data = await repo.get_graph_data(exclude_types=exclude_types)
 
-    # 前端期望的节点字段（带默认值）
     nodes = []
     for n in data["nodes"]:
         nodes.append({
@@ -49,7 +43,6 @@ async def get_graph(
             "source_mentions": n.get("source_mentions", []),
         })
 
-    # 前端期望 links 中是 type 字段，仓库返回的是 relation
     links = []
     for l in data["links"]:
         links.append({
@@ -73,9 +66,9 @@ async def get_graph(
 async def get_graph_stats(
     exclude: str = "Author",
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """获取图谱统计信息"""
     repo = KnowledgeRepository(db, user.id)
     exclude_types = [t.strip() for t in exclude.split(",") if t.strip()] if exclude else []
-    return repo.get_stats(exclude_types=exclude_types)
+    return await repo.get_stats(exclude_types=exclude_types)

@@ -1,12 +1,11 @@
-"""PostgreSQL 数据库管理 - 论文元数据、分块、向量、引用关系
+"""PostgreSQL 数据库管理 - 异步版本
 
-所有函数通过 get_connection() 获取 SQLAlchemy Session，函数签名保持与原 SQLite 版本兼容。
-conn 参数类型为 sqlalchemy.orm.Session（支持 with 语句）。
+所有函数通过 get_connection() 获取 AsyncSession，使用 SQLAlchemy 2.x 风格查询。
 """
 
 import json
 import logging
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from typing import Optional
 
 import numpy as np
@@ -14,39 +13,37 @@ import numpy as np
 logger = logging.getLogger("research-server.db")
 
 
-def _get_session_factory():
-    """延迟导入 SessionLocal，避免循环依赖。"""
-    from web.backend.db.base import SessionLocal
-    return SessionLocal
+def _get_async_session_factory():
+    """延迟导入 get_session_factory，避免循环依赖。"""
+    from web.backend.db.base import get_session_factory
+    return get_session_factory()
 
 
-@contextmanager
-def get_connection():
-    """获取 PostgreSQL session 的上下文管理器。
+@asynccontextmanager
+async def get_connection():
+    """获取异步 PostgreSQL session 的上下文管理器。
 
-    用法与原 SQLite 版本一致:
-        with get_connection() as conn:
-            paper = get_paper(conn, paper_id)
+    用法:
+        async with get_connection() as conn:
+            paper = await get_paper(conn, paper_id)
     """
-    SessionLocal = _get_session_factory()
-    session = SessionLocal()
-    try:
-        yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
+    factory = _get_async_session_factory()
+    async with factory() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 # ── Paper CRUD ────────────────────────────────────────────────────────────
 
-def upsert_paper(conn, paper: dict) -> None:
+async def upsert_paper(conn, paper: dict) -> None:
     """插入或更新论文元数据"""
     from web.backend.db.models import Paper
+    from sqlalchemy import select
 
-    # Normalize authors: accept both JSON string and list
     authors = paper.get("authors", [])
     if isinstance(authors, str):
         try:
@@ -54,7 +51,9 @@ def upsert_paper(conn, paper: dict) -> None:
         except (json.JSONDecodeError, TypeError):
             authors = [authors] if authors else []
 
-    existing = conn.query(Paper).filter(Paper.id == paper["id"]).first()
+    result = await conn.execute(select(Paper).where(Paper.id == paper["id"]))
+    existing = result.scalar_one_or_none()
+
     if existing:
         existing.title = paper["title"]
         existing.authors = authors
@@ -72,7 +71,6 @@ def upsert_paper(conn, paper: dict) -> None:
             existing.citation_count = max(
                 existing.citation_count or 0, paper["citation_count"]
             )
-        # visibility / owner: only escalate, never downgrade
         if paper.get("visibility") and existing.visibility != "private":
             existing.visibility = paper["visibility"]
         if paper.get("created_by_user_id") and not existing.created_by_user_id:
@@ -91,20 +89,22 @@ def upsert_paper(conn, paper: dict) -> None:
             visibility=paper.get("visibility", "public"),
             created_by_user_id=paper.get("created_by_user_id"),
         ))
-    conn.flush()
+    await conn.flush()
 
 
-def get_paper(conn, paper_id: str) -> Optional[dict]:
+async def get_paper(conn, paper_id: str) -> Optional[dict]:
     """获取单篇论文，返回 dict 或 None"""
     from web.backend.db.models import Paper
+    from sqlalchemy import select
 
-    row = conn.query(Paper).filter(Paper.id == paper_id).first()
+    result = await conn.execute(select(Paper).where(Paper.id == paper_id))
+    row = result.scalar_one_or_none()
     if not row:
         return None
     return {
         "id": row.id,
         "title": row.title,
-        "authors": row.authors if isinstance(row.authors, list) else json.loads(row.authors or "[]"),
+        "authors": row.authors if isinstance(row.authors, list) else (json.loads(row.authors) if row.authors else []),
         "abstract": row.abstract,
         "year": row.year,
         "source": row.source,
@@ -117,11 +117,13 @@ def get_paper(conn, paper_id: str) -> Optional[dict]:
     }
 
 
-def get_all_papers(conn) -> list[dict]:
+async def get_all_papers(conn) -> list[dict]:
     """获取所有论文"""
     from web.backend.db.models import Paper
+    from sqlalchemy import select
 
-    rows = conn.query(Paper).order_by(Paper.created_at.desc()).all()
+    result = await conn.execute(select(Paper).order_by(Paper.created_at.desc()))
+    rows = result.scalars().all()
     return [{
         "id": r.id, "title": r.title, "authors": r.authors,
         "abstract": r.abstract, "year": r.year, "source": r.source,
@@ -131,7 +133,7 @@ def get_all_papers(conn) -> list[dict]:
 
 # ── Chunk CRUD ────────────────────────────────────────────────────────────
 
-def insert_chunks(conn, paper_id: str, chunks: list[dict]) -> list[int]:
+async def insert_chunks(conn, paper_id: str, chunks: list[dict]) -> list[int]:
     """批量插入分块，返回 chunk_id 列表"""
     from web.backend.db.models import Chunk
 
@@ -144,37 +146,40 @@ def insert_chunks(conn, paper_id: str, chunks: list[dict]) -> list[int]:
             text=chunk["text"],
         )
         conn.add(obj)
-        conn.flush()  # 获取自增 id
+        await conn.flush()
         ids.append(obj.id)
     return ids
 
 
-def get_chunks_by_paper(conn, paper_id: str) -> list[dict]:
+async def get_chunks_by_paper(conn, paper_id: str) -> list[dict]:
     """获取论文的所有分块"""
     from web.backend.db.models import Chunk
+    from sqlalchemy import select
 
-    rows = (
-        conn.query(Chunk)
-        .filter(Chunk.paper_id == paper_id)
+    result = await conn.execute(
+        select(Chunk)
+        .where(Chunk.paper_id == paper_id)
         .order_by(Chunk.ordinal)
-        .all()
     )
+    rows = result.scalars().all()
     return [{"id": r.id, "paper_id": r.paper_id, "section": r.section,
              "ordinal": r.ordinal, "text": r.text} for r in rows]
 
 
-def get_all_chunks(conn) -> list[dict]:
+async def get_all_chunks(conn) -> list[dict]:
     """获取所有分块"""
     from web.backend.db.models import Chunk
+    from sqlalchemy import select
 
-    rows = conn.query(Chunk).order_by(Chunk.paper_id, Chunk.ordinal).all()
+    result = await conn.execute(select(Chunk).order_by(Chunk.paper_id, Chunk.ordinal))
+    rows = result.scalars().all()
     return [{"id": r.id, "paper_id": r.paper_id, "section": r.section,
              "ordinal": r.ordinal, "text": r.text} for r in rows]
 
 
 # ── Embedding CRUD ────────────────────────────────────────────────────────
 
-def insert_embeddings_batch(conn, chunk_ids: list[int], vecs: list[list[float]]) -> None:
+async def insert_embeddings_batch(conn, chunk_ids: list[int], vecs: list[list[float]]) -> None:
     """批量插入向量"""
     from web.backend.db.models import Embedding
 
@@ -185,20 +190,20 @@ def insert_embeddings_batch(conn, chunk_ids: list[int], vecs: list[list[float]])
             dim=len(arr),
             vec=arr.tobytes(),
         ))
-    conn.flush()
+    await conn.flush()
 
 
-def get_all_embeddings(conn) -> list[dict]:
+async def get_all_embeddings(conn) -> list[dict]:
     """获取所有向量（用于 brute-force cosine similarity 检索）"""
     from web.backend.db.models import Embedding, Chunk, Paper
     from sqlalchemy import select
 
-    rows = (
-        conn.query(Embedding, Chunk, Paper)
+    result = await conn.execute(
+        select(Embedding, Chunk, Paper)
         .join(Chunk, Embedding.chunk_id == Chunk.id)
         .join(Paper, Chunk.paper_id == Paper.id)
-        .all()
     )
+    rows = result.all()
     results = []
     for emb, chunk, paper in rows:
         vec = np.frombuffer(emb.vec, dtype=np.float32).copy()
@@ -214,24 +219,22 @@ def get_all_embeddings(conn) -> list[dict]:
     return results
 
 
-def get_embeddings_by_paper_ids(conn, paper_ids: set[str] | list[str]) -> list[dict]:
-    """仅获取指定 paper_ids 对应的向量（Web 多用户隔离查询）。
-
-    返回结构与 get_all_embeddings() 一致。
-    """
+async def get_embeddings_by_paper_ids(conn, paper_ids: set[str] | list[str]) -> list[dict]:
+    """仅获取指定 paper_ids 对应的向量"""
     from web.backend.db.models import Embedding, Chunk, Paper
+    from sqlalchemy import select
 
     if not paper_ids:
         return []
 
     paper_id_list = list(paper_ids)
-    rows = (
-        conn.query(Embedding, Chunk, Paper)
+    result = await conn.execute(
+        select(Embedding, Chunk, Paper)
         .join(Chunk, Embedding.chunk_id == Chunk.id)
         .join(Paper, Chunk.paper_id == Paper.id)
-        .filter(Chunk.paper_id.in_(paper_id_list))
-        .all()
+        .where(Chunk.paper_id.in_(paper_id_list))
     )
+    rows = result.all()
     results = []
     for emb, chunk, paper in rows:
         vec = np.frombuffer(emb.vec, dtype=np.float32).copy()
@@ -249,33 +252,38 @@ def get_embeddings_by_paper_ids(conn, paper_ids: set[str] | list[str]) -> list[d
 
 # ── Citation CRUD ─────────────────────────────────────────────────────────
 
-def insert_citation(conn, source_id: str, target_id: str) -> None:
+async def insert_citation(conn, source_id: str, target_id: str) -> None:
     """插入引用关系（忽略重复）"""
     from web.backend.db.models import Citation
+    from sqlalchemy import select
 
-    existing = conn.query(Citation).filter(
-        Citation.source_id == source_id,
-        Citation.target_id == target_id,
-    ).first()
+    result = await conn.execute(
+        select(Citation).where(
+            Citation.source_id == source_id,
+            Citation.target_id == target_id,
+        )
+    )
+    existing = result.scalar_one_or_none()
     if not existing:
         conn.add(Citation(source_id=source_id, target_id=target_id))
-        conn.flush()
+        await conn.flush()
 
 
-def get_citations(conn, paper_id: str) -> dict:
+async def get_citations(conn, paper_id: str) -> dict:
     """获取论文的引用关系"""
     from web.backend.db.models import Citation
+    from sqlalchemy import select
 
-    citing = (
-        conn.query(Citation.target_id)
-        .filter(Citation.source_id == paper_id)
-        .all()
+    result_citing = await conn.execute(
+        select(Citation.target_id).where(Citation.source_id == paper_id)
     )
-    cited_by = (
-        conn.query(Citation.source_id)
-        .filter(Citation.target_id == paper_id)
-        .all()
+    citing = result_citing.all()
+
+    result_cited_by = await conn.execute(
+        select(Citation.source_id).where(Citation.target_id == paper_id)
     )
+    cited_by = result_cited_by.all()
+
     return {
         "citing": [r[0] for r in citing],
         "cited_by": [r[0] for r in cited_by],

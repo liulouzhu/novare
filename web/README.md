@@ -4,7 +4,7 @@
 
 - Python >= 3.10
 - Node.js >= 18
-- PostgreSQL（可选，默认使用 SQLite）
+- PostgreSQL（必须配置 DATABASE_URL 环境变量）
 
 ## 快速启动
 

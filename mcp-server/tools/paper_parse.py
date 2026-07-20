@@ -93,26 +93,27 @@ def _validate_user_local_file(file_path: str, user_id: str | None) -> str:
     return str(resolved)
 
 
-def _user_has_fulltext_access(user_id: str, paper_id: str) -> bool:
+async def _user_has_fulltext_access(user_id: str, paper_id: str) -> bool:
     """查询用户是否对指定论文有全文访问权限。"""
     try:
-        from web.backend.db.base import SessionLocal
+        from web.backend.db.base import get_session_factory
         from web.backend.db.models import UserPaper
         from uuid import UUID
-        db = SessionLocal()
-        try:
-            return db.query(UserPaper).filter(
-                UserPaper.user_id == UUID(user_id),
-                UserPaper.paper_id == paper_id,
-                UserPaper.has_fulltext_access.is_(True),
-            ).first() is not None
-        finally:
-            db.close()
+        from sqlalchemy import select
+        async with get_session_factory()() as db:
+            result = await db.execute(
+                select(UserPaper).where(
+                    UserPaper.user_id == UUID(user_id),
+                    UserPaper.paper_id == paper_id,
+                    UserPaper.has_fulltext_access.is_(True),
+                )
+            )
+            return result.scalar_one_or_none() is not None
     except Exception:
         return False
 
 
-def _can_reuse_paper_pdf(paper: dict, user_id: str | None) -> bool:
+async def _can_reuse_paper_pdf(paper: dict, user_id: str | None) -> bool:
     """判断当前用户是否可以复用已有 paper 的 pdf_path。
 
     - public paper + pdf_path 在公共缓存目录 → 允许
@@ -133,7 +134,7 @@ def _can_reuse_paper_pdf(paper: dict, user_id: str | None) -> bool:
             return False
         if creator and creator == str(user_id):
             return True
-        return _user_has_fulltext_access(user_id, paper_id)
+        return await _user_has_fulltext_access(user_id, paper_id)
 
     # public paper
     public_dir = Path(_public_papers_dir()).resolve()
@@ -146,10 +147,10 @@ def _can_reuse_paper_pdf(paper: dict, user_id: str | None) -> bool:
         return False
     if creator and creator == str(user_id):
         return True
-    return _user_has_fulltext_access(user_id, paper_id)
+    return await _user_has_fulltext_access(user_id, paper_id)
 
 
-def associate_user_paper(
+async def associate_user_paper(
     user_id: str,
     paper_id: str,
     relation_type: str = "parsed",
@@ -160,17 +161,19 @@ def associate_user_paper(
     if not user_id:
         return
     try:
-        from web.backend.db.base import SessionLocal
+        from web.backend.db.base import get_session_factory
         from web.backend.db.models import UserPaper
         from uuid import UUID
-        db = SessionLocal()
-        try:
-            existing = db.query(UserPaper).filter(
-                UserPaper.user_id == UUID(user_id),
-                UserPaper.paper_id == paper_id,
-            ).first()
+        from sqlalchemy import select
+        async with get_session_factory()() as db:
+            result = await db.execute(
+                select(UserPaper).where(
+                    UserPaper.user_id == UUID(user_id),
+                    UserPaper.paper_id == paper_id,
+                )
+            )
+            existing = result.scalar_one_or_none()
             if existing:
-                # 升级：parsed 覆盖 searched，fulltext 只升不降
                 if existing.relation_type == "searched" and relation_type != "searched":
                     existing.relation_type = relation_type
                 if has_fulltext_access and not existing.has_fulltext_access:
@@ -185,9 +188,7 @@ def associate_user_paper(
                     has_fulltext_access=has_fulltext_access,
                     source=source,
                 ))
-            db.commit()
-        finally:
-            db.close()
+            await db.commit()
     except Exception as e:
         logger.warning("Failed to associate user-paper: %s", e)
 
@@ -254,10 +255,10 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
         if not resolved_paper_id:
             resolved_paper_id = os.path.splitext(os.path.basename(file_path))[0]
 
-    with get_connection() as conn:
+    async with get_connection() as conn:
         # 尝试从数据库获取论文信息
         if paper_id:
-            paper = get_paper(conn, paper_id)
+            paper = await get_paper(conn, paper_id)
             if paper:
                 if paper.get("pdf_path") and os.path.exists(paper["pdf_path"]):
                     if not _can_reuse_paper_pdf(paper, user_id):
@@ -286,18 +287,18 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
         return fail("paper_parse", f"PDF 文件不存在: {pdf_path}")
 
     # 检查是否已经解析过
-    with get_connection() as conn:
+    async with get_connection() as conn:
         if resolved_paper_id:
-            existing_chunks = get_chunks_by_paper(conn, resolved_paper_id)
+            existing_chunks = await get_chunks_by_paper(conn, resolved_paper_id)
             if existing_chunks:
                 # 可见性校验：private 论文需要权限才能关联
-                paper = get_paper(conn, resolved_paper_id)
+                paper = await get_paper(conn, resolved_paper_id)
                 if paper and paper.get("visibility") == "private":
                     creator = str(paper.get("created_by_user_id") or "")
                     if creator and creator != str(user_id or ""):
-                        if not _user_has_fulltext_access(user_id or "", resolved_paper_id):
+                        if not await _user_has_fulltext_access(user_id or "", resolved_paper_id):
                             return fail("paper_parse", f"论文 {resolved_paper_id} 是私有论文，您无权访问。")
-                associate_user_paper(user_id, resolved_paper_id)
+                await associate_user_paper(user_id, resolved_paper_id)
                 return ok(
                     "paper_parse",
                     {"paper_id": resolved_paper_id, "already_parsed": True, "chunk_count": len(existing_chunks)},
@@ -359,10 +360,10 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
         embeddings = None
 
     # 写入数据库
-    with get_connection() as conn:
+    async with get_connection() as conn:
         # 确保论文存在
         if resolved_paper_id:
-            existing = get_paper(conn, resolved_paper_id)
+            existing = await get_paper(conn, resolved_paper_id)
             if not existing:
                 # 从 PDF 内容提取基本信息
                 title = _extract_title_from_markdown(markdown_text)
@@ -377,30 +378,27 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
                     "url": pdf_url,
                     "citation_count": 0,
                 }
-                # 本地上传文件 → private + 记录所有者
                 if is_local_file and user_id:
                     paper_data["visibility"] = "private"
                     paper_data["created_by_user_id"] = user_id
-                upsert_paper(conn, paper_data)
+                await upsert_paper(conn, paper_data)
             else:
-                # 更新 pdf_path（private paper 仅 owner 或有权用户可更新）
                 from web.backend.db.models import Paper
-                existing_row = conn.query(Paper).filter(Paper.id == resolved_paper_id).first()
+                from sqlalchemy import select
+                result = await conn.execute(select(Paper).where(Paper.id == resolved_paper_id))
+                existing_row = result.scalar_one_or_none()
                 if existing_row:
                     if existing_row.visibility == "private" and existing_row.created_by_user_id:
                         if str(existing_row.created_by_user_id) != str(user_id or ""):
-                            if not _user_has_fulltext_access(user_id or "", resolved_paper_id):
+                            if not await _user_has_fulltext_access(user_id or "", resolved_paper_id):
                                 return fail("paper_parse", "您无权更新该私有论文的 PDF 路径。")
                     existing_row.pdf_path = pdf_path
 
-        # 插入分块
-        chunk_ids = insert_chunks(conn, resolved_paper_id, all_chunks)
+        chunk_ids = await insert_chunks(conn, resolved_paper_id, all_chunks)
 
-        # 插入向量
         if embeddings:
-            insert_embeddings_batch(conn, chunk_ids, embeddings)
+            await insert_embeddings_batch(conn, chunk_ids, embeddings)
 
-        # 提取参考文献并建立引用关系
         refs = extract_references(markdown_text)
         ref_ids = extract_paper_ids_from_refs(refs)
         citations_added = 0
@@ -411,7 +409,7 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
                 target_id = f"arxiv:{ref['arxiv_id']}"
             else:
                 continue
-            insert_citation(conn, resolved_paper_id, target_id)
+            await insert_citation(conn, resolved_paper_id, target_id)
             citations_added += 1
 
     # 同步写入 Milvus（如果可用）
@@ -420,23 +418,23 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
 
     # 关联用户与论文（PostgreSQL）
     if resolved_paper_id:
-        associate_user_paper(user_id, resolved_paper_id)
+        await associate_user_paper(user_id, resolved_paper_id)
 
     # 自动构建知识图谱（从摘要提取实体）
     kg_result = ""
     if resolved_paper_id:
         try:
             from tools.knowledge_graph import extract_from_abstract_sync
-            kg_result = extract_from_abstract_sync(resolved_paper_id, user_id=user_id)
+            kg_result = await extract_from_abstract_sync(resolved_paper_id, user_id=user_id)
             logger.info("Knowledge graph updated for %s", resolved_paper_id)
         except Exception as e:
             logger.warning("Knowledge graph extraction failed: %s", e)
 
     # 提取标题（供 sources 使用）
     title = None
-    with get_connection() as conn:
+    async with get_connection() as conn:
         if resolved_paper_id:
-            paper_row = get_paper(conn, resolved_paper_id)
+            paper_row = await get_paper(conn, resolved_paper_id)
             if paper_row:
                 title = paper_row.get("title")
 

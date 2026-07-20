@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import sys
 from pathlib import Path
@@ -18,12 +17,12 @@ from novare.agent_loop import AgentLoop  # noqa: E402
 from novare.config import NovareConfig, get_user_workspace  # noqa: E402
 from novare.llm_client import LLMClient  # noqa: E402
 from novare.mcp_client import McpClient  # noqa: E402
-from novare.session import Session, JsonlSessionStore  # noqa: E402
+from novare.session import Session  # noqa: E402
 from novare.tools.registry import ToolDef, ToolRegistry  # noqa: E402
 from novare.tool_result import parse_tool_result  # noqa: E402
 from novare.subagents.registry import SubagentRegistry  # noqa: E402
 from novare.subagents.tools import register_subagent_tools  # noqa: E402
-from web.backend.db.base import SessionLocal  # noqa: E402
+from web.backend.db.base import get_session_factory  # noqa: E402
 from web.backend.repositories import SessionRepository, MessageRepository  # noqa: E402
 from web.backend.memory_service import MemoryServiceAsync  # noqa: E402
 from web.backend.redis_service import redis_service  # noqa: E402
@@ -58,7 +57,6 @@ class AgentService:
             proxy=self.config.proxy,
         )
 
-        # 评审模型（可选，用于双模型对抗评审）
         if self.config.reviewer_api_key:
             self.reviewer_llm = LLMClient(
                 api_key=self.config.reviewer_api_key,
@@ -72,7 +70,6 @@ class AgentService:
 
         self.tool_registry = ToolRegistry(workspace=self.config.workspace)
 
-        # 连接 MCP 服务器并注册工具
         for name, mcp_cfg in self.config.mcp_servers.items():
             logger.info("Connecting MCP server: %s", name)
             try:
@@ -97,7 +94,6 @@ class AgentService:
             except Exception:
                 logger.exception("Failed to connect MCP server: %s", name)
 
-        # 长期记忆服务
         if self.config.enable_long_term_memory:
             self.memory_service = MemoryServiceAsync(max_memories=self.config.max_memories_per_user)
             logger.info("Long-term memory enabled (max=%d)", self.config.max_memories_per_user)
@@ -115,7 +111,6 @@ class AgentService:
             turn_timeout=self.config.turn_timeout,
         )
 
-        # 初始化子智能体系统
         self.subagent_registry = SubagentRegistry()
         register_subagent_tools(
             tool_registry=self.tool_registry,
@@ -135,7 +130,6 @@ class AgentService:
 
     async def shutdown(self):
         """关闭时清理资源"""
-        # 取消所有运行中的子智能体
         if self.subagent_registry:
             cancelled = await self.subagent_registry.cancel_all()
             if cancelled:
@@ -157,19 +151,18 @@ class AgentService:
             return Path(get_user_workspace(user_id))
         return self.config.workspace
 
-    def load_session(self, session_id: str, user_id: str | None = None) -> Session:
+    async def load_session(self, session_id: str, user_id: str | None = None) -> Session:
         """加载或创建会话。Web 用户（有 user_id）从 DB 加载，否则从 JSONL。"""
         ws = self._workspace_for(user_id)
         session = Session(session_id=session_id, workspace=ws)
 
         if user_id:
-            # Web 模式：从 PostgreSQL 加载消息
+            # Web 模式：从异步 DB 加载消息
             try:
-                from uuid import UUID
-                db = SessionLocal()
-                try:
-                    msg_repo = MessageRepository(db, UUID(user_id))
-                    messages = msg_repo.get_messages(session_id)
+                user_uuid = UUID(user_id)
+                async with get_session_factory()() as db:
+                    msg_repo = MessageRepository(db, user_uuid)
+                    messages = await msg_repo.get_messages(session_id)
                     session.messages = [
                         {
                             "role": m.role,
@@ -179,8 +172,6 @@ class AgentService:
                         }
                         for m in messages
                     ]
-                finally:
-                    db.close()
             except Exception:
                 logger.exception("Failed to load session from DB, returning empty session")
             return session
@@ -191,19 +182,18 @@ class AgentService:
             except FileNotFoundError:
                 return session
 
-    def list_sessions(self, user_id: str | None = None) -> list[dict]:
+    async def list_sessions(self, user_id: str | None = None) -> list[dict]:
         """列出所有会话（简略信息）。Web 用户从 DB 查询。"""
         if user_id:
             try:
-                from uuid import UUID
-                db = SessionLocal()
-                try:
-                    session_repo = SessionRepository(db, UUID(user_id))
-                    msg_repo = MessageRepository(db, UUID(user_id))
-                    sessions = session_repo.list_all()
+                user_uuid = UUID(user_id)
+                async with get_session_factory()() as db:
+                    session_repo = SessionRepository(db, user_uuid)
+                    sessions = await session_repo.list_all()
                     result = []
                     for s in sessions:
-                        messages = msg_repo.get_messages(s.id)
+                        msg_repo = MessageRepository(db, user_uuid)
+                        messages = await msg_repo.get_messages(s.id)
                         title = s.title or _extract_title([{"role": m.role, "content": m.content} for m in messages])
                         result.append({
                             "session_id": s.id,
@@ -212,8 +202,6 @@ class AgentService:
                             "updated_at": s.updated_at.isoformat() if s.updated_at else "",
                         })
                     return result
-                finally:
-                    db.close()
             except Exception:
                 logger.exception("Failed to list sessions from DB")
                 return []
@@ -240,21 +228,15 @@ class AgentService:
         """创建新会话"""
         return Session(workspace=self._workspace_for(user_id))
 
-    def delete_session(self, session_id: str, user_id: str | None = None):
+    async def delete_session(self, session_id: str, user_id: str | None = None):
         """删除会话。Web 用户从 DB 删除。"""
         if user_id:
             try:
-                from uuid import UUID
-                db = SessionLocal()
-                try:
-                    repo = SessionRepository(db, UUID(user_id))
-                    repo.delete(session_id)
-                    db.commit()
-                except Exception:
-                    db.rollback()
-                    raise
-                finally:
-                    db.close()
+                user_uuid = UUID(user_id)
+                async with get_session_factory()() as db:
+                    repo = SessionRepository(db, user_uuid)
+                    await repo.delete(session_id)
+                    await db.commit()
             except Exception:
                 logger.exception("Failed to delete session from DB")
             return
@@ -270,17 +252,8 @@ class AgentService:
         queue: asyncio.Queue,
         user_id: str | None = None,
     ):
-        """执行一轮对话，通过 queue 将事件推送给 WebSocket
-
-        事件格式：
-            {"type": "text_delta", "content": "..."}
-            {"type": "reasoning_delta", "content": "..."}
-            {"type": "tool_start", "tool": "...", "params": {...}}
-            {"type": "tool_end", "tool": "...", "result": "...", "duration": 2.3}
-            {"type": "tool_error", "tool": "...", "error": "..."}
-            {"type": "done"}
-        """
-        # ── Redis 并发锁：防止同一会话重入 ──
+        """执行一轮对话，通过 queue 将事件推送给 WebSocket"""
+        # ── Redis 并发锁 ──
         lock_key: str | None = None
         lock_token: str | None = None
         _lock_acquired: bool = False
@@ -306,7 +279,6 @@ class AgentService:
         if user_id and redis_service.is_available:
             task_key = f"task:user:{user_id}:session:{session.session_id}"
             cancel_key = f"cancel:user:{user_id}:session:{session.session_id}"
-            # 清理旧 cancel key，写入 running 状态
             await redis_service.delete(cancel_key)
             from datetime import datetime, timezone
             task_started_at = datetime.now(timezone.utc).isoformat()
@@ -332,7 +304,6 @@ class AgentService:
             return False
 
         def on_text(chunk: str):
-            # 区分 reasoning 和 content 通过前缀标记（来自 llm_client）
             queue.put_nowait({"type": "text_delta", "content": chunk})
 
         def on_tool(event: str, name: str, args: dict, result: str | None, duration: float | None):
@@ -342,7 +313,6 @@ class AgentService:
                     "tool": name,
                     "params": args,
                 })
-                # 更新任务状态（异步写 Redis，不阻塞回调；在 terminal 状态前 gather 确保顺序）
                 if task_key and redis_service.is_available:
                     _now = datetime.now(timezone.utc).isoformat()
                     _t = asyncio.create_task(redis_service.set_json(task_key, {
@@ -358,7 +328,6 @@ class AgentService:
                     _status_tasks.append(_t)
             elif event in ("end", "error"):
                 parsed = parse_tool_result(result or "")
-                # data_preview：结构化 data（前端展开用），JSON 工具直接取，旧格式为 None
                 data_preview = parsed.data if parsed.is_json else None
                 queue.put_nowait({
                     "type": "tool_end" if parsed.ok else "tool_error",
@@ -376,7 +345,7 @@ class AgentService:
             # ── 构建本轮的 system_prompt（带用户记忆注入）──
             turn_system_prompt = self.config.system_prompt
             if user_id and self.memory_service:
-                memory_prompt = self.memory_service._get_existing_text(user_id)
+                memory_prompt = await self.memory_service._get_existing_text(user_id)
                 if memory_prompt:
                     turn_system_prompt = (
                         self.config.system_prompt
@@ -388,21 +357,16 @@ class AgentService:
                         + "请根据以上用户画像数据调整你的回答风格和内容侧重。\n"
                     )
 
-            # 记录本轮前的消息数，用于提取新增消息
             msgs_before = len(session.messages)
-
-            # compact 标记：on_compact 回调中置为 True
             compacted = False
 
             def _on_compact(_session):
                 nonlocal compacted
                 compacted = True
 
-            # task state 推送回调
             def on_task_state(state_dict: dict):
                 queue.put_nowait({"type": "task_state", **state_dict})
 
-            # tool_context 注入：user_id 供 MCP 工具使用，workspace 供文件类 builtin 工具隔离
             ctx = {"user_id": user_id, "workspace": str(self._workspace_for(user_id))} if user_id else None
 
             result = await self.agent.run_turn(
@@ -438,54 +402,41 @@ class AgentService:
                 await queue.put({"type": "done"})
                 return result
 
-            # ── 持久化到 PostgreSQL（仅当 user_id 存在时） ──
+            # ── 持久化到 PostgreSQL（短生命周期异步 Session） ──
             if user_id:
                 try:
                     user_uuid = UUID(user_id)
-                    db = SessionLocal()
-                    try:
-                        # 确保 DB session 存在
+                    async with get_session_factory()() as db:
                         session_repo = SessionRepository(db, user_uuid)
-                        session_model = session_repo.get_by_id(session.session_id)
+                        session_model = await session_repo.get_by_id(session.session_id)
                         if not session_model:
-                            session_repo.create(session.session_id, title=_extract_title_from_text(user_input))
+                            await session_repo.create(session.session_id, title=_extract_title_from_text(user_input))
                         elif session_model.title in ("", "新会话", "New Chat"):
-                            session_repo.update_title(session.session_id, _extract_title_from_text(user_input))
+                            await session_repo.update_title(session.session_id, _extract_title_from_text(user_input))
 
                         msg_repo = MessageRepository(db, user_uuid)
                         if compacted:
-                            # compact 发生后，用完整 session.messages 替换 DB
-                            if not msg_repo.replace_session_messages(session.session_id, session.messages):
+                            if not await msg_repo.replace_session_messages(session.session_id, session.messages):
                                 logger.warning("replace_session_messages rejected: session %s not owned by user %s", session.session_id, user_id)
                         else:
-                            # 正常无 compact：增量追加本轮新消息
                             new_messages = session.messages[msgs_before:]
                             if new_messages:
                                 for msg in new_messages:
-                                    msg_repo.add_message(
+                                    await msg_repo.add_message(
                                         session_id=session.session_id,
                                         role=msg["role"],
                                         content=msg.get("content"),
                                         tool_calls=msg.get("tool_calls"),
                                         tool_call_id=msg.get("tool_call_id"),
                                     )
-                        db.commit()
-                    except Exception:
-                        db.rollback()
-                        logger.exception("Failed to persist messages to DB")
-                    finally:
-                        db.close()
+                        await db.commit()
                 except Exception:
                     logger.exception("DB persistence error (non-fatal)")
 
-            # ── Web 模式不写 JSONL，DB 是唯一持久化来源 ──
-
-            # ── 等待异步 tool 状态更新完成，避免 terminal 状态被覆盖 ──
             if _status_tasks:
                 await asyncio.gather(*_status_tasks, return_exceptions=True)
                 _status_tasks.clear()
 
-            # ── 写任务完成状态 ──
             if task_key and redis_service.is_available:
                 _now = datetime.now(timezone.utc).isoformat()
                 await redis_service.set_json(task_key, {
@@ -499,7 +450,6 @@ class AgentService:
                     "error": None,
                 }, ttl=task_ttl)
 
-            # ── 先通知客户端完成，记忆提取放后台不阻塞 ──
             await queue.put({"type": "done"})
 
             if user_id and self.memory_service and self.llm_client:
@@ -512,7 +462,7 @@ class AgentService:
                             llm_client=self.llm_client,
                         )
                     )
-                    _bg.add_done_callback(lambda t: t.exception() or None)  # 防止未 await 警告
+                    _bg.add_done_callback(lambda t: t.exception() or None)
                     _background_tasks.add(_bg)
                     _bg.add_done_callback(_background_tasks.discard)
                 except Exception:
@@ -529,7 +479,6 @@ class AgentService:
                 error_msg = "LLM API 响应超时，请稍后重试（可能是模型处理时间过长）"
             elif "ConnectError" in type(e).__name__ or "Connect" in error_msg:
                 error_msg = "无法连接到 LLM API，请检查网络和 API 配置"
-            # 写错误状态
             if _status_tasks:
                 await asyncio.gather(*_status_tasks, return_exceptions=True)
                 _status_tasks.clear()
@@ -548,8 +497,6 @@ class AgentService:
             await queue.put({"type": "error", "message": error_msg})
             return ""
         finally:
-            # ── 释放 Redis 并发锁 ──
-            # 仅当真正获得锁后才释放；使用 compare-and-delete 避免误删他人续期/重建的同 key 锁
             if _lock_acquired and lock_key and lock_token:
                 try:
                     await redis_service.delete_if_value(lock_key, lock_token)
@@ -558,7 +505,7 @@ class AgentService:
 
 
 def _make_mcp_handler(client: McpClient, tool_name: str):
-    """创建 MCP 工具的 handler 闭包，调用 MCP client 的 call_tool"""
+    """创建 MCP 工具的 handler 闭包"""
     async def handler(arguments: dict, **kwargs) -> str:
         payload = dict(arguments)
         user_id = kwargs.get("user_id")

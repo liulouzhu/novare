@@ -1,47 +1,53 @@
 from uuid import UUID
 
-from sqlalchemy import or_
-from sqlalchemy.orm import Session
+from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from web.backend.db.models import Paper
 from .base import SharedRepository
 
 
 class PaperRepository(SharedRepository):
-    def __init__(self, db: Session):
+    def __init__(self, db: AsyncSession):
         super().__init__(db)
 
-    def get_by_id(self, paper_id: str) -> Paper | None:
-        return self.db.query(Paper).filter(Paper.id == paper_id).first()
+    async def get_by_id(self, paper_id: str) -> Paper | None:
+        result = await self.db.execute(
+            select(Paper).where(Paper.id == paper_id)
+        )
+        return result.scalar_one_or_none()
 
-    def get_visible(self, paper_id: str, user_id: UUID | None = None) -> Paper | None:
+    async def get_visible(self, paper_id: str, user_id: UUID | None = None) -> Paper | None:
         """获取论文，仅返回当前用户有权访问的（public 或自己创建的 private）。"""
-        q = self.db.query(Paper).filter(Paper.id == paper_id)
+        stmt = select(Paper).where(Paper.id == paper_id)
         if user_id:
-            q = q.filter(or_(Paper.visibility == "public", Paper.created_by_user_id == user_id))
+            stmt = stmt.where(or_(Paper.visibility == "public", Paper.created_by_user_id == user_id))
         else:
-            q = q.filter(Paper.visibility == "public")
-        return q.first()
+            stmt = stmt.where(Paper.visibility == "public")
+        result = await self.db.execute(stmt)
+        return result.scalar_one_or_none()
 
-    def get_all(self, q: str | None = None, user_id: UUID | None = None) -> list[Paper]:
+    async def get_all(self, q: str | None = None, user_id: UUID | None = None) -> list[Paper]:
         """列出论文：public 全部可见，private 仅创建者可见。"""
-        query = self.db.query(Paper)
+        stmt = select(Paper)
         if user_id:
-            query = query.filter(or_(Paper.visibility == "public", Paper.created_by_user_id == user_id))
+            stmt = stmt.where(or_(Paper.visibility == "public", Paper.created_by_user_id == user_id))
         else:
-            query = query.filter(Paper.visibility == "public")
+            stmt = stmt.where(Paper.visibility == "public")
         if q:
-            query = query.filter(Paper.title.ilike(f"%{q}%"))
-        return query.order_by(Paper.created_at.desc()).all()
+            stmt = stmt.where(Paper.title.ilike(f"%{q}%"))
+        stmt = stmt.order_by(Paper.created_at.desc())
+        result = await self.db.execute(stmt)
+        return list(result.scalars().all())
 
-    def upsert(self, paper_data: dict) -> Paper:
-        paper = self.db.query(Paper).filter(Paper.id == paper_data["id"]).first()
-        if paper:
+    async def upsert(self, paper_data: dict) -> Paper:
+        existing = await self.get_by_id(paper_data["id"])
+        if existing:
             for key, value in paper_data.items():
                 if key != "id":
-                    setattr(paper, key, value)
+                    setattr(existing, key, value)
         else:
-            paper = Paper(**paper_data)
-            self.db.add(paper)
-        self.db.flush()
-        return paper
+            existing = Paper(**paper_data)
+            self.db.add(existing)
+        await self.db.flush()
+        return existing

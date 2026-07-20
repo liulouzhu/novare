@@ -4,47 +4,48 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from web.backend.db.models import UserMemory
 from .base import BaseRepository
 
 
 class MemoryRepository(BaseRepository):
-    def __init__(self, db: Session, user_id: UUID):
+    def __init__(self, db: AsyncSession, user_id: UUID):
         super().__init__(db, user_id)
 
-    def get_all(self) -> list[UserMemory]:
+    async def get_all(self) -> list[UserMemory]:
         """获取该用户的所有记忆条目"""
-        return (
-            self.db.query(UserMemory)
-            .filter(UserMemory.user_id == self.user_id)
+        result = await self.db.execute(
+            select(UserMemory)
+            .where(UserMemory.user_id == self.user_id)
             .order_by(UserMemory.category, UserMemory.key)
-            .all()
         )
+        return list(result.scalars().all())
 
-    def get_by_category(self, category: str) -> list[UserMemory]:
+    async def get_by_category(self, category: str) -> list[UserMemory]:
         """按类别查询记忆"""
-        return (
-            self.db.query(UserMemory)
-            .filter(UserMemory.user_id == self.user_id, UserMemory.category == category)
+        result = await self.db.execute(
+            select(UserMemory)
+            .where(UserMemory.user_id == self.user_id, UserMemory.category == category)
             .order_by(UserMemory.key)
-            .all()
         )
+        return list(result.scalars().all())
 
-    def get_by_key(self, category: str, key: str) -> UserMemory | None:
+    async def get_by_key(self, category: str, key: str) -> UserMemory | None:
         """查询单条记忆"""
-        return (
-            self.db.query(UserMemory)
-            .filter(
+        result = await self.db.execute(
+            select(UserMemory)
+            .where(
                 UserMemory.user_id == self.user_id,
                 UserMemory.category == category,
                 UserMemory.key == key,
             )
-            .first()
         )
+        return result.scalar_one_or_none()
 
-    def upsert(
+    async def upsert(
         self,
         category: str,
         key: str,
@@ -54,12 +55,8 @@ class MemoryRepository(BaseRepository):
         source: str = "auto",
         pinned: bool = False,
     ) -> UserMemory:
-        """插入或更新记忆条目
-
-        如果相同 user_id + category + key 已存在，则更新 value、confidence、tags。
-        pinned 字段：如果新条目 pinned=True，则更新时也锁定。
-        """
-        existing = self.get_by_key(category, key)
+        """插入或更新记忆条目"""
+        existing = await self.get_by_key(category, key)
         if existing:
             existing.value = value
             existing.confidence = confidence
@@ -67,8 +64,8 @@ class MemoryRepository(BaseRepository):
                 existing.tags = tags
             existing.source = source
             if pinned:
-                existing.pinned = True  # 只能从 False → True，不自动解锁
-            self.db.flush()
+                existing.pinned = True
+            await self.db.flush()
             return existing
 
         memory = UserMemory(
@@ -82,68 +79,60 @@ class MemoryRepository(BaseRepository):
             source=source,
         )
         self.db.add(memory)
-        self.db.flush()
+        await self.db.flush()
         return memory
 
-    def delete(self, memory_id: int) -> bool:
+    async def delete(self, memory_id: int) -> bool:
         """删除单条记忆"""
-        memory = (
-            self.db.query(UserMemory)
-            .filter(UserMemory.id == memory_id, UserMemory.user_id == self.user_id)
-            .first()
+        result = await self.db.execute(
+            select(UserMemory)
+            .where(UserMemory.id == memory_id, UserMemory.user_id == self.user_id)
         )
+        memory = result.scalar_one_or_none()
         if memory:
-            self.db.delete(memory)
-            self.db.flush()
+            await self.db.delete(memory)
+            await self.db.flush()
             return True
         return False
 
-    def delete_all(self) -> int:
+    async def delete_all(self) -> int:
         """删除该用户的所有记忆，返回删除数量"""
-        count = (
-            self.db.query(UserMemory)
-            .filter(UserMemory.user_id == self.user_id)
-            .delete()
+        from sqlalchemy import delete as sa_delete
+        result = await self.db.execute(
+            sa_delete(UserMemory).where(UserMemory.user_id == self.user_id)
         )
-        self.db.flush()
-        return count
+        await self.db.flush()
+        return result.rowcount
 
-    def count(self) -> int:
+    async def count(self) -> int:
         """统计该用户的记忆条目数"""
-        return (
-            self.db.query(UserMemory)
-            .filter(UserMemory.user_id == self.user_id)
-            .count()
+        result = await self.db.execute(
+            select(func.count()).select_from(UserMemory).where(UserMemory.user_id == self.user_id)
         )
+        return result.scalar_one()
 
-    def evict_excess(self, max_count: int) -> int:
-        """淘汰超出上限的记忆条目，返回删除数量
-
-        淘汰策略：
-        1. pinned=True 的条目永远不会被淘汰
-        2. 在非 pinned 条目中，按置信度升序 + 更新时间升序排列
-        3. 低置信度 + 长时间未更新的先被淘汰
-        """
-        current = self.count()
+    async def evict_excess(self, max_count: int) -> int:
+        """淘汰超出上限的记忆条目，返回删除数量"""
+        current = await self.count()
         if current <= max_count:
             return 0
 
         to_remove = current - max_count
 
         # 只从非 pinned 条目中淘汰
-        candidates = (
-            self.db.query(UserMemory)
-            .filter(
+        result = await self.db.execute(
+            select(UserMemory)
+            .where(
                 UserMemory.user_id == self.user_id,
                 UserMemory.pinned == False,  # noqa: E712
             )
             .order_by(UserMemory.confidence.asc(), UserMemory.updated_at.asc())
             .limit(to_remove)
-            .all()
         )
+        candidates = list(result.scalars().all())
 
         for m in candidates:
-            self.db.delete(m)
+            await self.db.delete(m)
 
-        self.db.flush()
+        await self.db.flush()
         return len(candidates)

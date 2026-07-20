@@ -10,7 +10,6 @@ build/
 .pytest_cache/
 data/
 docs/
-tests/
 research-agent-design.md
 novare_test_harness.py
 
@@ -18,6 +17,7 @@ novare_test_harness.py
 web/frontend/node_modules/
 web/frontend/dist/
 web/frontend/.vite/
+web/frontend/tsconfig.tsbuildinfo
 
 # User workspace (sessions, uploads, papers)
 workspace/

@@ -705,29 +705,29 @@ def _save_graph(G: nx.DiGraph, user_id: str | None = None) -> None:
 _MUTATING_ACTIONS = {"add_paper", "add_concept", "add_relation", "extract_from_abstract", "normalize"}
 
 
-def save_to_pg(user_id: str, graph: nx.DiGraph):
+async def save_to_pg(user_id: str, graph: nx.DiGraph):
     """Save NetworkX graph nodes/edges to PostgreSQL (secondary storage)."""
     if not user_id:
         return
     try:
-        from web.backend.db.base import SessionLocal
+        from web.backend.db.base import get_session_factory
         from web.backend.db.models import KnowledgeNode, KnowledgeEdge
         from uuid import UUID
-        db = SessionLocal()
-        try:
+        from sqlalchemy import select
+        async with get_session_factory()() as db:
             uid = UUID(user_id)
-
-            # Build a label->pg_id mapping for edge resolution
             label_to_id = {}
 
-            # Upsert nodes
             for node_id, data in graph.nodes(data=True):
                 label = data.get("label") or data.get("name") or data.get("title") or node_id
                 node_type = data.get("type", "concept")
-                existing = db.query(KnowledgeNode).filter(
-                    KnowledgeNode.user_id == uid,
-                    KnowledgeNode.label == label,
-                ).first()
+                result = await db.execute(
+                    select(KnowledgeNode).where(
+                        KnowledgeNode.user_id == uid,
+                        KnowledgeNode.label == label,
+                    )
+                )
+                existing = result.scalar_one_or_none()
                 if not existing:
                     pg_node = KnowledgeNode(
                         user_id=uid,
@@ -736,40 +736,47 @@ def save_to_pg(user_id: str, graph: nx.DiGraph):
                         properties={k: v for k, v in data.items() if k not in ("label", "type", "name", "title")},
                     )
                     db.add(pg_node)
-                    db.flush()  # get the generated id
+                    await db.flush()
                     label_to_id[node_id] = pg_node.id
                 else:
                     existing.type = node_type
                     existing.properties = {k: v for k, v in data.items() if k not in ("label", "type", "name", "title")}
                     label_to_id[node_id] = existing.id
 
-            db.commit()
+            await db.commit()
 
-            # Upsert edges
             for u, v, edata in graph.edges(data=True):
                 source_label = graph.nodes.get(u, {}).get("label") or graph.nodes.get(u, {}).get("name") or graph.nodes.get(u, {}).get("title") or u
                 target_label = graph.nodes.get(v, {}).get("label") or graph.nodes.get(v, {}).get("name") or graph.nodes.get(v, {}).get("title") or v
                 rel_type = edata.get("type", "related_to")
 
-                # Resolve PG node IDs (may need a query if not freshly created)
                 src_id = label_to_id.get(u)
                 tgt_id = label_to_id.get(v)
                 if not src_id:
-                    src_node = db.query(KnowledgeNode).filter(KnowledgeNode.user_id == uid, KnowledgeNode.label == source_label).first()
+                    result = await db.execute(
+                        select(KnowledgeNode).where(KnowledgeNode.user_id == uid, KnowledgeNode.label == source_label)
+                    )
+                    src_node = result.scalar_one_or_none()
                     src_id = src_node.id if src_node else None
                 if not tgt_id:
-                    tgt_node = db.query(KnowledgeNode).filter(KnowledgeNode.user_id == uid, KnowledgeNode.label == target_label).first()
+                    result = await db.execute(
+                        select(KnowledgeNode).where(KnowledgeNode.user_id == uid, KnowledgeNode.label == target_label)
+                    )
+                    tgt_node = result.scalar_one_or_none()
                     tgt_id = tgt_node.id if tgt_node else None
 
                 if not src_id or not tgt_id:
                     continue
 
-                existing_edge = db.query(KnowledgeEdge).filter(
-                    KnowledgeEdge.user_id == uid,
-                    KnowledgeEdge.source_node_id == src_id,
-                    KnowledgeEdge.target_node_id == tgt_id,
-                    KnowledgeEdge.relation_type == rel_type,
-                ).first()
+                result = await db.execute(
+                    select(KnowledgeEdge).where(
+                        KnowledgeEdge.user_id == uid,
+                        KnowledgeEdge.source_node_id == src_id,
+                        KnowledgeEdge.target_node_id == tgt_id,
+                        KnowledgeEdge.relation_type == rel_type,
+                    )
+                )
+                existing_edge = result.scalar_one_or_none()
                 edge_props = {k: v for k, v in edata.items() if k != "type"}
                 if not existing_edge:
                     db.add(KnowledgeEdge(
@@ -782,26 +789,24 @@ def save_to_pg(user_id: str, graph: nx.DiGraph):
                 else:
                     existing_edge.properties = edge_props
 
-            db.commit()
-        finally:
-            db.close()
+            await db.commit()
     except Exception as e:
         logger.warning("Failed to save KG to PostgreSQL: %s", e)
 
 
-def _action_add_paper(G: nx.DiGraph, args: dict) -> str:
+async def _action_add_paper(G: nx.DiGraph, args: dict) -> str:
     """添加论文节点及其关系"""
     paper_id = args.get("paper_id")
     if not paper_id:
         return fail("knowledge_graph", "请提供 paper_id。")
 
-    with get_connection() as conn:
-        paper = get_paper(conn, paper_id)
+    async with get_connection() as conn:
+        paper = await get_paper(conn, paper_id)
         if not paper:
             return fail("knowledge_graph", f"论文 {paper_id} 不存在于数据库中。请先使用 paper_search 搜索。")
 
         from core.database import get_citations
-        citations = get_citations(conn, paper_id)
+        citations = await get_citations(conn, paper_id)
 
     # 创建 Paper 节点
     G.add_node(paper_id, type="Paper", title=paper["title"],
@@ -1019,7 +1024,7 @@ def _action_normalize(G: nx.DiGraph, args: dict) -> str:
     }, summary=f"图谱归一化完成: 归一化/合并 {normalized_count} 个实体，补充 {semantic_count} 条论文语义关系")
 
 
-def _action_extract_from_abstract(G: nx.DiGraph, args: dict) -> str:
+async def _action_extract_from_abstract(G: nx.DiGraph, args: dict) -> str:
     """从论文摘要中自动提取实体并构建知识图谱
 
     支持两种模式：
@@ -1030,9 +1035,8 @@ def _action_extract_from_abstract(G: nx.DiGraph, args: dict) -> str:
     if not paper_id:
         return fail("knowledge_graph", "请提供 paper_id。")
 
-    # 确保论文节点存在
-    with get_connection() as conn:
-        paper = get_paper(conn, paper_id)
+    async with get_connection() as conn:
+        paper = await get_paper(conn, paper_id)
 
     if not paper:
         return fail("knowledge_graph", f"论文 {paper_id} 不存在于数据库中。请先使用 paper_search 搜索。")
@@ -1065,15 +1069,16 @@ def _action_extract_from_abstract(G: nx.DiGraph, args: dict) -> str:
         abstract = paper.get("abstract", "")
         if not abstract:
             # 尝试从已解析的分块中获取摘要
-            with get_connection() as conn:
+            async with get_connection() as conn:
                 from web.backend.db.models import Chunk
-                rows = (
-                    conn.query(Chunk.text)
-                    .filter(Chunk.paper_id == paper_id, Chunk.section.ilike("%abstract%"))
+                from sqlalchemy import select
+                result = await conn.execute(
+                    select(Chunk.text)
+                    .where(Chunk.paper_id == paper_id, Chunk.section.ilike("%abstract%"))
                     .order_by(Chunk.ordinal)
                     .limit(1)
-                    .all()
                 )
+                rows = result.all()
             if rows:
                 abstract = rows[0][0]
         if not abstract:
@@ -1233,13 +1238,13 @@ async def handle_knowledge_graph(args: dict, user_id: str = None) -> str:
 
     # Persist to PostgreSQL after mutating actions
     if action in _MUTATING_ACTIONS:
-        save_to_pg(user_id, G)
+        await save_to_pg(user_id, G)
 
     return result
 
 
-def extract_from_abstract_sync(paper_id: str, entities: list[dict] | None = None, user_id: str = None) -> str:
-    """同步版本，供 paper_parse 直接调用。
+async def extract_from_abstract_sync(paper_id: str, entities: list[dict] | None = None, user_id: str = None) -> str:
+    """异步版本，供 paper_parse 直接调用。
 
     返回统一 JSON 字符串 (ok/fail)。调用方可以 json.loads() 获取结构化数据。
     """
@@ -1247,6 +1252,6 @@ def extract_from_abstract_sync(paper_id: str, entities: list[dict] | None = None
     args = {"paper_id": paper_id}
     if entities:
         args["entities"] = entities
-    result = _action_extract_from_abstract(G, args)
-    save_to_pg(user_id, G)
+    result = await _action_extract_from_abstract(G, args)
+    await save_to_pg(user_id, G)
     return result

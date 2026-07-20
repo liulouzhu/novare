@@ -1,57 +1,73 @@
 from uuid import UUID
-from sqlalchemy.orm import Session
+from sqlalchemy import select, or_
+from sqlalchemy.ext.asyncio import AsyncSession
 from web.backend.db.models import KnowledgeNode, KnowledgeEdge
 from .base import BaseRepository
 
 
 class KnowledgeRepository(BaseRepository):
-    def __init__(self, db: Session, user_id: UUID):
+    def __init__(self, db: AsyncSession, user_id: UUID):
         super().__init__(db, user_id)
 
-    def add_node(self, label: str, node_type: str, properties: dict | None = None) -> KnowledgeNode:
+    async def add_node(self, label: str, node_type: str, properties: dict | None = None) -> KnowledgeNode:
         node = KnowledgeNode(user_id=self.user_id, label=label, type=node_type, properties=properties or {})
         self.db.add(node)
-        self.db.flush()
+        await self.db.flush()
         return node
 
-    def add_edge(self, source_id: UUID, target_id: UUID, relation_type: str,
+    async def add_edge(self, source_id: UUID, target_id: UUID, relation_type: str,
                  properties: dict | None = None) -> KnowledgeEdge:
         edge = KnowledgeEdge(
             user_id=self.user_id, source_node_id=source_id, target_node_id=target_id,
             relation_type=relation_type, properties=properties or {},
         )
         self.db.add(edge)
-        self.db.flush()
+        await self.db.flush()
         return edge
 
-    def get_nodes(self, node_type: str | None = None) -> list[KnowledgeNode]:
-        query = self.db.query(KnowledgeNode).filter(KnowledgeNode.user_id == self.user_id)
+    async def get_nodes(self, node_type: str | None = None) -> list[KnowledgeNode]:
+        stmt = select(KnowledgeNode).where(KnowledgeNode.user_id == self.user_id)
         if node_type:
-            query = query.filter(KnowledgeNode.type == node_type)
-        return query.all()
+            stmt = stmt.where(KnowledgeNode.type == node_type)
+        result = await self.db.execute(stmt)
+        return list(result.scalars().all())
 
-    def get_edges(self) -> list[KnowledgeEdge]:
-        return self.db.query(KnowledgeEdge).filter(KnowledgeEdge.user_id == self.user_id).all()
+    async def get_edges(self) -> list[KnowledgeEdge]:
+        result = await self.db.execute(
+            select(KnowledgeEdge).where(KnowledgeEdge.user_id == self.user_id)
+        )
+        return list(result.scalars().all())
 
-    def find_node_by_label(self, label: str) -> KnowledgeNode | None:
-        return self.db.query(KnowledgeNode).filter(
-            KnowledgeNode.user_id == self.user_id, KnowledgeNode.label == label,
-        ).first()
-
-    def get_neighbors(self, node_id: UUID) -> list[KnowledgeNode]:
-        edge_ids = self.db.query(KnowledgeEdge.target_node_id).filter(
-            KnowledgeEdge.user_id == self.user_id, KnowledgeEdge.source_node_id == node_id,
-        ).union(
-            self.db.query(KnowledgeEdge.source_node_id).filter(
-                KnowledgeEdge.user_id == self.user_id, KnowledgeEdge.target_node_id == node_id,
+    async def find_node_by_label(self, label: str) -> KnowledgeNode | None:
+        result = await self.db.execute(
+            select(KnowledgeNode).where(
+                KnowledgeNode.user_id == self.user_id,
+                KnowledgeNode.label == label,
             )
-        ).all()
-        ids = [r[0] for r in edge_ids]
+        )
+        return result.scalar_one_or_none()
+
+    async def get_neighbors(self, node_id: UUID) -> list[KnowledgeNode]:
+        # 获取与 node_id 相连的节点 ID
+        stmt_out = select(KnowledgeEdge.target_node_id).where(
+            KnowledgeEdge.user_id == self.user_id,
+            KnowledgeEdge.source_node_id == node_id,
+        )
+        stmt_in = select(KnowledgeEdge.source_node_id).where(
+            KnowledgeEdge.user_id == self.user_id,
+            KnowledgeEdge.target_node_id == node_id,
+        )
+        result_out = await self.db.execute(stmt_out)
+        result_in = await self.db.execute(stmt_in)
+        ids = [r[0] for r in result_out.all()] + [r[0] for r in result_in.all()]
         if not ids:
             return []
-        return self.db.query(KnowledgeNode).filter(KnowledgeNode.id.in_(ids)).all()
+        result = await self.db.execute(
+            select(KnowledgeNode).where(KnowledgeNode.id.in_(ids))
+        )
+        return list(result.scalars().all())
 
-    def find_path(self, source_id: UUID, target_id: UUID, max_depth: int = 5) -> list:
+    async def find_path(self, source_id: UUID, target_id: UUID, max_depth: int = 5) -> list:
         from collections import deque
         visited = {source_id}
         queue = deque([(source_id, [source_id])])
@@ -61,10 +77,16 @@ class KnowledgeRepository(BaseRepository):
                 continue
             if current == target_id:
                 return path
-            edges = self.db.query(KnowledgeEdge).filter(
-                KnowledgeEdge.user_id == self.user_id,
-                (KnowledgeEdge.source_node_id == current) | (KnowledgeEdge.target_node_id == current),
-            ).all()
+            result = await self.db.execute(
+                select(KnowledgeEdge).where(
+                    KnowledgeEdge.user_id == self.user_id,
+                    or_(
+                        KnowledgeEdge.source_node_id == current,
+                        KnowledgeEdge.target_node_id == current,
+                    ),
+                )
+            )
+            edges = list(result.scalars().all())
             for edge in edges:
                 next_id = edge.target_node_id if edge.source_node_id == current else edge.source_node_id
                 if next_id not in visited:
@@ -72,11 +94,10 @@ class KnowledgeRepository(BaseRepository):
                     queue.append((next_id, path + [next_id]))
         return []
 
-    def get_graph_data(self, exclude_types: list[str] | None = None) -> dict:
-        nodes = self.get_nodes()
-        edges = self.get_edges()
+    async def get_graph_data(self, exclude_types: list[str] | None = None) -> dict:
+        nodes = await self.get_nodes()
+        edges = await self.get_edges()
 
-        # 按类型过滤节点
         excluded = set(exclude_types) if exclude_types else set()
         excluded_ids = set()
 
@@ -89,7 +110,6 @@ class KnowledgeRepository(BaseRepository):
                 {"id": str(n.id), "label": n.label, "type": n.type, **(n.properties or {})}
             )
 
-        # 过滤引用被排除节点的边
         filtered_links = []
         for e in edges:
             src, tgt = str(e.source_node_id), str(e.target_node_id)
@@ -101,9 +121,9 @@ class KnowledgeRepository(BaseRepository):
 
         return {"nodes": filtered_nodes, "links": filtered_links}
 
-    def get_stats(self, exclude_types: list[str] | None = None) -> dict:
-        nodes = self.get_nodes()
-        edges = self.get_edges()
+    async def get_stats(self, exclude_types: list[str] | None = None) -> dict:
+        nodes = await self.get_nodes()
+        edges = await self.get_edges()
         excluded = set(exclude_types) if exclude_types else set()
         excluded_ids = {str(n.id) for n in nodes if n.type in excluded}
         filtered_nodes = [n for n in nodes if str(n.id) not in excluded_ids]

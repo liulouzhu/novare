@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from web.backend.auth.dependencies import get_current_user
 from web.backend.auth.service import decode_access_token
-from web.backend.db.base import SessionLocal
+from web.backend.db.base import get_session_factory
 from web.backend.db.models import User
 from web.backend.redis_service import redis_service
 from web.backend.repositories import SessionRepository
@@ -49,24 +52,23 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
         return
 
     # 验证会话属于当前用户
-    db = SessionLocal()
-    try:
-        from uuid import UUID
-        repo = SessionRepository(db, UUID(user_id_str))
-        session_model = repo.get_by_id(session_id)
-        if not session_model:
-            await websocket.accept()
-            await websocket.close(code=4004, reason="Session not found")
-            return
-    finally:
-        db.close()
+    async with get_session_factory()() as db:
+        try:
+            repo = SessionRepository(db, UUID(user_id_str))
+            session_model = await repo.get_by_id(session_id)
+            if not session_model:
+                await websocket.accept()
+                await websocket.close(code=4004, reason="Session not found")
+                return
+        finally:
+            await db.close()
 
     # ── 接受连接 ──
     await websocket.accept()
     logger.info("WebSocket connected: session=%s user=%s", session_id, user_id_str)
 
     from web.backend.app import agent_service
-    session = agent_service.load_session(session_id, user_id=user_id_str)
+    session = await agent_service.load_session(session_id, user_id=user_id_str)
     queue: asyncio.Queue = asyncio.Queue()
     current_task: asyncio.Task | None = None
     stopped = False
@@ -89,20 +91,16 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
                 msg_type = data.get("type", "send")
 
                 if msg_type == "stop":
-                    # 优先通过 Redis cancel key 协作式取消
                     if redis_service.is_available:
                         cancel_key = f"cancel:user:{user_id_str}:session:{session_id}"
                         await redis_service.set(cancel_key, "1", ttl=task_ttl)
-                        # 不设 stopped — 让事件转发循环继续，等待 AgentService 发回 cancelled + done
                     else:
-                        # Redis 不可用时降级：强杀 task + 丢弃后续事件
                         stopped = True
                         if current_task and not current_task.done():
                             current_task.cancel()
                             logger.info("Agent task force-cancelled (no Redis): session=%s", session_id)
                     continue
 
-                # 将消息放入 queue 由主循环处理
                 await queue.put(data)
         except WebSocketDisconnect:
             pass
@@ -111,7 +109,6 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
         recv_task = asyncio.create_task(recv_messages())
 
         while True:
-            # 等待用户消息（从 recv_messages 放入的 queue）
             data = await queue.get()
 
             msg_type = data.get("type", "send")
@@ -122,7 +119,6 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
 
             stopped = False
 
-            # 构建用户输入（含引用上下文）
             user_input = content
             if msg_type == "send_with_refs" and data.get("references"):
                 refs_text = "\n\n参考文献：\n"
@@ -130,18 +126,15 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
                     refs_text += f"- {ref.get('title', ref.get('id', ''))}\n"
                 user_input = content + refs_text
 
-            # 创建 agent 任务
             event_queue: asyncio.Queue = asyncio.Queue()
             current_task = asyncio.create_task(
                 agent_service.run_turn(session, user_input, event_queue, user_id=user_id_str)
             )
 
-            # 从 event_queue 读取事件并推送给客户端
             try:
                 while True:
                     event = await asyncio.wait_for(event_queue.get(), timeout=300)
                     if stopped:
-                        # 用户已停止，丢弃剩余事件
                         break
                     await websocket.send_json(event)
                     if event.get("type") in ("done", "error"):
@@ -153,7 +146,6 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
             except asyncio.CancelledError:
                 logger.info("Agent task cancelled: session=%s", session_id)
 
-            # 如果被停止，发送 done 事件让前端完成清理
             if stopped:
                 await websocket.send_json({"type": "done"})
                 stopped = False
@@ -169,7 +161,6 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
         except Exception:
             pass
     finally:
-        # 确保取消运行中的任务
         if current_task and not current_task.done():
             current_task.cancel()
         if not recv_task.done():

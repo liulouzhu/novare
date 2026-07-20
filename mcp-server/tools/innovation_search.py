@@ -167,12 +167,13 @@ async def handle_innovation_search(arguments: dict, user_id: str = None) -> str:
             p["_relevance"] = _score_paper_relevance(p, query)
         papers.sort(key=lambda x: x["_relevance"], reverse=True)
 
-        # 保存到数据库并关联用户
+        # 保存到数据库并关联用户（best-effort：失败时带 warning 返回搜索结果）
+        db_persist_warning = None
         try:
-            with get_connection() as conn:
+            async with get_connection() as conn:
                 for p in papers:
                     if p.get("paper_id"):
-                        upsert_paper(conn, {
+                        await upsert_paper(conn, {
                             "id": p["paper_id"],
                             "title": p.get("title", ""),
                             "abstract": p.get("abstract", ""),
@@ -188,14 +189,15 @@ async def handle_innovation_search(arguments: dict, user_id: str = None) -> str:
                     from tools.paper_parse import associate_user_paper
                     for p in papers:
                         if p.get("paper_id"):
-                            associate_user_paper(
+                            await associate_user_paper(
                                 user_id, p["paper_id"],
                                 relation_type="searched",
                                 has_fulltext_access=False,
                                 source="innovation_search",
                             )
         except Exception as e:
-            logger.warning("Failed to save papers to DB: %s", e)
+            logger.warning("Failed to persist papers to DB: %s", e)
+            db_persist_warning = "论文搜索成功，但数据库持久化失败，本次结果可能不会出现在论文库中。"
 
         papers_json = [
             {
@@ -212,12 +214,14 @@ async def handle_innovation_search(arguments: dict, user_id: str = None) -> str:
         sources = [{"id": p["paper_id"], "title": p.get("title", "")} for p in papers_json if p.get("paper_id")]
         providers = list(set(p.get("source", "") for p in papers if p.get("source")))
 
+        warnings = [db_persist_warning] if db_persist_warning else []
         return ok(
             "innovation_search",
             {"action": "landscape", "topic": topic, "total_papers": len(papers), "papers": papers_json},
             summary=f"文献景观扫描 '{topic}' 找到 {len(papers)} 篇论文",
             sources=sources,
             providers=providers,
+            warnings=warnings,
         )
 
     elif action == "novelty_search":

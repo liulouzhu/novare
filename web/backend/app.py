@@ -21,7 +21,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 from fastapi import FastAPI  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from web.backend.agent_service import AgentService  # noqa: E402
-from web.backend.db.base import Base, SessionLocal, engine  # noqa: E402
+from web.backend.db.base import Base, dispose_engine, get_engine, get_session_factory  # noqa: E402
 from web.backend.redis_service import redis_service  # noqa: E402
 from web.backend.sandbox.manager import (  # noqa: E402
     IDLE_TIMEOUT,
@@ -49,15 +49,18 @@ async def _idle_cleanup_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用启动/关闭生命周期"""
-    # 切换工作目录到项目根目录（.env 在此）
     os.chdir(PROJECT_ROOT)
 
-    # 确保数据库表存在
-    import web.backend.db.models  # noqa: F401 — register all models with Base
-    Base.metadata.create_all(bind=engine)
-    web_logger.info("DB tables ensured")
+    # 导入所有模型，确保 Base.metadata 包含所有表定义
+    import web.backend.db.models  # noqa: F401
 
-    # Clean up stale sandbox containers from previous runs, then start idle watcher
+    # 通过 Alembic 管理数据库结构，不再执行 create_all
+    # 如果需要自动建表（仅开发用途），取消下面的注释：
+    # async with engine.begin() as conn:
+    #     await conn.run_sync(Base.metadata.create_all)
+    web_logger.info("DB engine ready (use 'alembic upgrade head' to create tables)")
+
+    # Clean up stale sandbox containers, then start idle watcher
     sandbox_manager.startup()
     cleanup_task = asyncio.create_task(_idle_cleanup_loop())
     web_logger.info("Sandbox idle cleanup task started (interval=%ds)", max(60, IDLE_TIMEOUT // 4))
@@ -95,7 +98,7 @@ async def lifespan(app: FastAPI):
         adapter = AgentAdapter(
             bus=bus,
             agent_service=agent_service,
-            db_session_factory=SessionLocal,
+            db_session_factory=get_session_factory(),
             default_user_id=agent_service.config.channel_default_user_id or None,
         )
 
@@ -106,7 +109,6 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        # Shut down sandbox lifecycle: cancel cleanup, destroy all containers
         cleanup_task.cancel()
         try:
             await cleanup_task
@@ -117,7 +119,6 @@ async def lifespan(app: FastAPI):
         except Exception:
             web_logger.warning("Sandbox shutdown error (non-fatal)", exc_info=True)
 
-        # Shut down channel system
         if channel_tasks:
             await adapter.stop()
             await manager.stop_all()
@@ -129,13 +130,15 @@ async def lifespan(app: FastAPI):
                 except asyncio.CancelledError:
                     pass
 
-        # 关闭 Redis 连接
         await redis_service.close()
 
         try:
             await agent_service.shutdown()
         except Exception:
             web_logger.warning("Shutdown error (non-fatal)", exc_info=True)
+
+        # 释放异步数据库引擎连接池
+        await dispose_engine()
 
 
 app = FastAPI(
@@ -182,7 +185,6 @@ async def health():
         "sandbox": {"available": sandbox_manager.client is not None},
     }
     try:
-        # Redis 子检查
         if redis_service._enabled:
             result["redis"]["enabled"] = True
             result["redis"]["available"] = redis_service.is_available
@@ -192,18 +194,14 @@ async def health():
             except Exception:
                 result["redis"]["status"] = "unavailable"
 
-        # DB 子检查
+        # DB 子检查（异步）
         try:
-            db = SessionLocal()
-            try:
+            async with get_session_factory()() as db:
                 from sqlalchemy import text
-                db.execute(text("SELECT 1"))
-            finally:
-                db.close()
+                await db.execute(text("SELECT 1"))
         except Exception:
             result["database"]["status"] = "error"
     except Exception:
-        # 整个 health 不能 500
         pass
     return result
 

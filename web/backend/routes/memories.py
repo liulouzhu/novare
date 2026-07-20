@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from web.backend.db.base import get_db
 from web.backend.db.models import User
@@ -35,10 +35,10 @@ def _to_out(m) -> MemoryOut:
 @router.get("", response_model=list[MemoryOut])
 async def list_memories(
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     repo = MemoryRepository(db, user.id)
-    return [_to_out(m) for m in repo.get_all()]
+    return [_to_out(m) for m in await repo.get_all()]
 
 
 @router.patch("/{memory_id}", response_model=MemoryOut)
@@ -46,11 +46,11 @@ async def update_memory(
     memory_id: int,
     body: MemoryUpdate,
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     repo = MemoryRepository(db, user.id)
-    # get_all + filter，因为 repo 没有 get_by_id
-    mem = next((m for m in repo.get_all() if m.id == memory_id), None)
+    memories = await repo.get_all()
+    mem = next((m for m in memories if m.id == memory_id), None)
     if not mem:
         raise HTTPException(404, "Memory not found")
 
@@ -61,8 +61,8 @@ async def update_memory(
     if body.confidence is not None:
         mem.confidence = max(0.0, min(1.0, body.confidence))
 
-    db.commit()
-    db.refresh(mem)
+    await db.commit()
+    await db.refresh(mem)
     return _to_out(mem)
 
 
@@ -70,16 +70,17 @@ async def update_memory(
 async def toggle_pin(
     memory_id: int,
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     repo = MemoryRepository(db, user.id)
-    mem = next((m for m in repo.get_all() if m.id == memory_id), None)
+    memories = await repo.get_all()
+    mem = next((m for m in memories if m.id == memory_id), None)
     if not mem:
         raise HTTPException(404, "Memory not found")
 
     mem.pinned = not mem.pinned
-    db.commit()
-    db.refresh(mem)
+    await db.commit()
+    await db.refresh(mem)
     return _to_out(mem)
 
 
@@ -87,22 +88,22 @@ async def toggle_pin(
 async def delete_memory(
     memory_id: int,
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     repo = MemoryRepository(db, user.id)
-    deleted = repo.delete(memory_id)
+    deleted = await repo.delete(memory_id)
     if not deleted:
         raise HTTPException(404, "Memory not found")
-    db.commit()
+    await db.commit()
     return {"ok": True}
 
 
 @router.delete("")
 async def clear_memories(
     user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     repo = MemoryRepository(db, user.id)
-    count = repo.delete_all()
-    db.commit()
+    count = await repo.delete_all()
+    await db.commit()
     return {"deleted": count}

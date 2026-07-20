@@ -1,4 +1,8 @@
-"""novare/session.py — 对话历史 + JSONL 持久化 + SessionStore 抽象"""
+"""novare/session.py — 对话历史 + JSONL 持久化 + SessionStore 抽象
+
+核心层模块，不依赖 web.backend.db。
+DbSessionStore 已移至 web/backend/db/session_store.py。
+"""
 
 from __future__ import annotations
 
@@ -11,10 +15,6 @@ from datetime import datetime
 from pathlib import Path
 
 from novare.context_manager import UsageTracker
-from sqlalchemy import func
-from sqlalchemy.orm import Session as SaSession
-
-from web.backend.db.models import MessageModel, SessionModel, User
 
 
 # ── 抽象接口 ─────────────────────────────────────────────────
@@ -90,7 +90,7 @@ class Session:
         确保 CLI 模式重新加载时上下文已压缩。
         """
         if not self.messages:
-            return  # 空会话不写文件
+            return
         self._dir.mkdir(parents=True, exist_ok=True)
         with open(self._path, "w", encoding="utf-8") as f:
             for msg in self.messages:
@@ -184,91 +184,5 @@ class JsonlSessionStore(SessionStore):
                 "title": title,
                 "message_count": len(messages),
                 "updated_at": datetime.fromtimestamp(p.stat().st_mtime).isoformat(),
-            })
-        return result
-
-
-# ── PostgreSQL 实现 ───────────────────────────────────────────
-
-class DbSessionStore(SessionStore):
-    """基于 PostgreSQL 的会话存储（通过 SQLAlchemy）"""
-
-    def __init__(self, db: SaSession, user_id: str):
-        self.db = db
-        self.user_id = user_id
-
-    def save_messages(self, session_id: str, messages: list[dict]) -> None:
-        """增量追加：仅追加新消息到数据库
-
-        调用方应仅传入本轮新增的消息（而非全部历史）。
-        ID 由数据库自增生成。
-        """
-        for msg in messages:
-            new_msg = MessageModel(
-                session_id=session_id,
-                role=msg["role"],
-                content=msg.get("content"),
-                tool_calls=msg.get("tool_calls"),
-                tool_call_id=msg.get("tool_call_id"),
-                name=msg.get("name"),
-            )
-            self.db.add(new_msg)
-        self.db.flush()
-
-    def load_messages(self, session_id: str) -> list[dict]:
-        rows = (
-            self.db.query(MessageModel)
-            .filter(MessageModel.session_id == session_id)
-            .order_by(MessageModel.id)
-            .all()
-        )
-        return [
-            {
-                "role": r.role,
-                "content": r.content or "",
-                **({"tool_calls": r.tool_calls} if r.tool_calls else {}),
-                **({"tool_call_id": r.tool_call_id} if r.tool_call_id else {}),
-            }
-            for r in rows
-        ]
-
-    def delete_session(self, session_id: str) -> bool:
-        session = (
-            self.db.query(SessionModel)
-            .filter(
-                SessionModel.id == session_id,
-                SessionModel.user_id == self.user_id,
-            )
-            .first()
-        )
-        if session:
-            self.db.query(MessageModel).filter(
-                MessageModel.session_id == session_id
-            ).delete()
-            self.db.delete(session)
-            self.db.flush()
-            return True
-        return False
-
-    def list_sessions(self, user_id: str | None = None) -> list[dict]:
-        uid = user_id or self.user_id
-        sessions = (
-            self.db.query(SessionModel)
-            .filter(SessionModel.user_id == uid)
-            .order_by(SessionModel.updated_at.desc())
-            .all()
-        )
-        result = []
-        for s in sessions:
-            count = (
-                self.db.query(func.count(MessageModel.id))
-                .filter(MessageModel.session_id == s.id)
-                .scalar()
-            ) or 0
-            result.append({
-                "session_id": s.id,
-                "title": s.title or "新会话",
-                "message_count": count,
-                "updated_at": s.updated_at.isoformat() if s.updated_at else "",
             })
         return result

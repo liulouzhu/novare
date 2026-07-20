@@ -324,15 +324,15 @@ async def handle_paper_search(args: dict, user_id: str = None) -> str:
     # 写入数据库并关联用户
     if merged:
         try:
-            with get_connection() as conn:
+            async with get_connection() as conn:
                 for paper in merged:
                     paper["visibility"] = "public"
-                    upsert_paper(conn, paper)
+                    await upsert_paper(conn, paper)
                 # 搜索到的论文自动关联到当前用户
                 if user_id:
                     from tools.paper_parse import associate_user_paper
                     for paper in merged:
-                        associate_user_paper(
+                        await associate_user_paper(
                             user_id, paper["id"],
                             relation_type="searched",
                             has_fulltext_access=False,

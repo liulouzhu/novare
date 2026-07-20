@@ -36,10 +36,12 @@ Agent 核心编排层
 
 - Python 3.10 或更高版本
 - Node.js 18 或更高版本
-- PostgreSQL
+- PostgreSQL（生产环境）
 - Docker（可选，用于隔离代码执行）
 - Redis（可选，用于并发锁、消息去重和任务状态）
 - Milvus（可选，用于论文向量检索）
+
+> **测试环境**：测试套件由 `tests/conftest.py` 显式设置 `sqlite+aiosqlite:///:memory:` 作为数据库 URL，无需安装 PostgreSQL。直接运行 `python -m pytest -q` 即可。
 
 ### 2. 安装后端依赖
 
@@ -82,7 +84,17 @@ JWT_SECRET_KEY=replace-with-a-long-random-string
 
 `NOVARE_BASE_URL` 支持 OpenAI 兼容接口，可以将地址、密钥和模型名替换为实际使用的模型服务。使用前请确保 `DATABASE_URL` 指向的数据库已经创建。
 
-### 5. 启动 Web 应用
+> **URL 格式说明**：传统的 `postgresql://` URL 会在应用内部自动转换为 `postgresql+asyncpg://`。`postgresql+asyncpg://` 格式可直接使用。生产环境必须配置 `DATABASE_URL`，缺少时应用启动会报错。
+
+### 5. 数据库迁移
+
+首次使用或更新后，需要执行 Alembic 迁移：
+
+```powershell
+alembic upgrade head
+```
+
+### 6. 启动 Web 应用
 
 Windows 可以使用一键启动脚本：
 
@@ -113,7 +125,7 @@ npm run dev
 - API 文档：<http://localhost:8000/docs>
 - 健康检查：<http://localhost:8000/api/health>
 
-### 6. 启动命令行模式
+### 7. 启动命令行模式
 
 如果只需要使用命令行科研助手，可以在项目根目录执行：
 
