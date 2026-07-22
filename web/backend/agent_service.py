@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -26,6 +27,9 @@ from web.backend.db.base import get_session_factory  # noqa: E402
 from web.backend.repositories import SessionRepository, MessageRepository  # noqa: E402
 from web.backend.memory_service import MemoryServiceAsync  # noqa: E402
 from web.backend.redis_service import redis_service  # noqa: E402
+from web.backend.episodic_memory.service import EpisodicMemoryService  # noqa: E402
+from web.backend.episodic_memory.vector_store import EpisodicMemoryVectorStore  # noqa: E402
+from web.backend.memory_extraction.coordinator import MemoryExtractionCoordinator  # noqa: E402
 
 logger = logging.getLogger("novare.web")
 
@@ -43,6 +47,8 @@ class AgentService:
         self.tool_registry: ToolRegistry | None = None
         self.agent: AgentLoop | None = None
         self.memory_service: MemoryServiceAsync | None = None
+        self.episodic_memory_service: EpisodicMemoryService | None = None
+        self.memory_coordinator: MemoryExtractionCoordinator | None = None
         self.subagent_registry: SubagentRegistry | None = None
         self._mcp_clients: list[McpClient] = []
 
@@ -100,6 +106,36 @@ class AgentService:
         else:
             self.memory_service = None
 
+        # 情景记忆
+        if self.config.episodic_memory_enabled:
+            vs = EpisodicMemoryVectorStore()
+            self.episodic_memory_service = EpisodicMemoryService(
+                enabled=True,
+                top_k=self.config.episodic_memory_top_k,
+                min_importance=self.config.episodic_memory_min_importance,
+                min_confidence=self.config.episodic_memory_min_confidence,
+                min_similarity=self.config.episodic_memory_min_similarity,
+                max_per_turn=self.config.episodic_memory_max_per_turn,
+                vector_store=vs,
+            )
+            logger.info(
+                "Episodic memory enabled (top_k=%d, min_imp=%.1f, min_conf=%.1f)",
+                self.config.episodic_memory_top_k,
+                self.config.episodic_memory_min_importance,
+                self.config.episodic_memory_min_confidence,
+            )
+        else:
+            self.episodic_memory_service = None
+
+        # 统一记忆提取协调器
+        if self.memory_service or self.episodic_memory_service:
+            self.memory_coordinator = MemoryExtractionCoordinator(
+                memory_service=self.memory_service,
+                episodic_memory_service=self.episodic_memory_service,
+            )
+        else:
+            self.memory_coordinator = None
+
         self.agent = AgentLoop(
             llm_client=self.llm_client,
             tool_registry=self.tool_registry,
@@ -130,6 +166,9 @@ class AgentService:
 
     async def shutdown(self):
         """关闭时清理资源"""
+        # 1. 先等待或取消后台记忆任务
+        await self._shutdown_background_tasks(timeout=5.0)
+
         if self.subagent_registry:
             cancelled = await self.subagent_registry.cancel_all()
             if cancelled:
@@ -144,6 +183,20 @@ class AgentService:
         if self.reviewer_llm:
             await self.reviewer_llm.close()
         logger.info("AgentService shut down")
+
+    async def _shutdown_background_tasks(self, timeout: float = 5.0):
+        """等待或取消后台记忆任务，防止 Task was never retrieved 警告。"""
+        if not _background_tasks:
+            return
+        tasks = list(_background_tasks)
+        _background_tasks.clear()
+        # 等待任务完成，超时后取消
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        logger.info("Background tasks shutdown: %d completed, %d cancelled", len(done), len(pending))
 
     def _workspace_for(self, user_id: str | None = None) -> Path:
         """Return workspace path — user-specific when user_id provided."""
@@ -357,6 +410,18 @@ class AgentService:
                         + "请根据以上用户画像数据调整你的回答风格和内容侧重。\n"
                     )
 
+            # ── 情景记忆注入 ──
+            if user_id and self.episodic_memory_service:
+                try:
+                    episodic_prompt = await self.episodic_memory_service.retrieve_for_prompt(
+                        user_id=user_id,
+                        query=user_input,
+                    )
+                    if episodic_prompt:
+                        turn_system_prompt += "\n\n" + episodic_prompt
+                except Exception:
+                    logger.debug("Episodic memory retrieval failed (non-fatal)")
+
             msgs_before = len(session.messages)
             compacted = False
 
@@ -452,19 +517,21 @@ class AgentService:
 
             await queue.put({"type": "done"})
 
-            if user_id and self.memory_service and self.llm_client:
+            # ── 统一记忆提取后台任务 ──
+            if user_id and self.memory_coordinator and self.llm_client:
                 new_messages = session.messages[msgs_before:]
                 try:
-                    _bg = asyncio.create_task(
-                        self.memory_service.extract_and_save(
+                    _bg_mem = asyncio.create_task(
+                        self.memory_coordinator.extract_and_persist(
                             user_id=user_id,
+                            session_id=session.session_id,
                             messages=new_messages,
                             llm_client=self.llm_client,
                         )
                     )
-                    _bg.add_done_callback(lambda t: t.exception() or None)
-                    _background_tasks.add(_bg)
-                    _bg.add_done_callback(_background_tasks.discard)
+                    _bg_mem.add_done_callback(_safe_task_callback)
+                    _background_tasks.add(_bg_mem)
+                    _bg_mem.add_done_callback(_background_tasks.discard)
                 except Exception:
                     logger.warning("Memory extraction scheduling failed (non-fatal)")
 
@@ -502,6 +569,18 @@ class AgentService:
                     await redis_service.delete_if_value(lock_key, lock_token)
                 except Exception:
                     logger.warning("Failed to release Redis lock key=%s", lock_key)
+
+
+def _safe_task_callback(task: asyncio.Task):
+    """安全的后台任务回调，避免 Task exception was never retrieved 警告。"""
+    try:
+        exc = task.exception()
+        if exc:
+            logger.warning("Background task failed: %s", exc)
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
 
 
 def _make_mcp_handler(client: McpClient, tool_name: str):

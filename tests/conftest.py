@@ -22,11 +22,104 @@ if str(MCP_ROOT) not in sys.path:
 # 在导入业务模块前设置测试数据库 URL
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 
-# 精确 Mock Milvus：只 mock 连接相关 API，不替换整个模块
-import unittest.mock as _mock
-from sqlalchemy import event as _sa_event
+from sqlalchemy import event as _sa_event  # noqa: E402
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession  # noqa: E402
 from web.backend.db.base import Base  # noqa: E402
+
+
+# ── 防逃逸 fixture：禁止默认测试访问真实 Milvus ──────────────────
+
+# 需要监控的 PyMilvus API 列表
+_MILVUS_FORBIDDEN_APIS = [
+    ("connections.connect", "pymilvus", "connections", "connect"),
+    ("connections.disconnect", "pymilvus", "connections", "disconnect"),
+    ("connections.list_connections", "pymilvus", "connections", "list_connections"),
+    ("utility.has_collection", "pymilvus", "utility", "has_collection"),
+    ("Collection", "pymilvus", "Collection", None),
+    ("Collection.load", "pymilvus", "Collection", "load"),
+    ("Collection.search", "pymilvus", "Collection", "search"),
+    ("Collection.insert", "pymilvus", "Collection", "insert"),
+    ("Collection.delete", "pymilvus", "Collection", "delete"),
+    ("Collection.flush", "pymilvus", "Collection", "flush"),
+    ("Collection.create_index", "pymilvus", "Collection", "create_index"),
+]
+
+
+def _make_recorder(name, attempted_calls):
+    """创建一个记录违规调用的函数。"""
+    def recorder(*args, **kwargs):
+        attempted_calls.append((name, args, kwargs))
+        raise RuntimeError(f"Forbidden Milvus call: {name}")
+    return recorder
+
+
+@pytest.fixture(autouse=True)
+def forbid_real_milvus_network(monkeypatch):
+    """默认单元测试禁止调用真实 Milvus 网络 API。
+
+    记录所有违规调用，teardown 时断言没有违规。
+    测试自身需要验证连接行为时，在测试内用 MagicMock 覆盖 recorder。
+    fixture teardown 自动恢复所有 patch，不跨测试污染。
+    """
+    attempted_calls = []
+
+    try:
+        import pymilvus as _pymilvus
+        from pymilvus import connections as _connections
+        from pymilvus import utility as _utility
+
+        # Patch connections API
+        monkeypatch.setattr(_connections, "connect",
+                            _make_recorder("connections.connect", attempted_calls))
+        monkeypatch.setattr(_connections, "disconnect",
+                            _make_recorder("connections.disconnect", attempted_calls))
+        monkeypatch.setattr(_connections, "list_connections",
+                            _make_recorder("connections.list_connections", attempted_calls))
+
+        # Patch utility API
+        monkeypatch.setattr(_utility, "has_collection",
+                            _make_recorder("utility.has_collection", attempted_calls))
+
+        # Patch Collection class — 需要保留构造能力但记录调用
+        _OriginalCollection = _pymilvus.Collection
+
+        class _RecordingCollection:
+            """包装 Collection，记录方法调用但不执行真实操作。"""
+            def __init__(self, *args, **kwargs):
+                attempted_calls.append(("Collection.__init__", args, kwargs))
+                raise RuntimeError("Forbidden Milvus call: Collection construction")
+
+        monkeypatch.setattr(_pymilvus, "Collection", _RecordingCollection)
+
+        # Patch 已缓存的调用方引用（core.vector_store）
+        try:
+            import core.vector_store as _cvs
+            monkeypatch.setattr(_cvs, "connections", _connections)
+            monkeypatch.setattr(_cvs, "utility", _utility)
+            monkeypatch.setattr(_cvs, "Collection", _RecordingCollection)
+        except ImportError:
+            pass
+
+        # Patch 已缓存的调用方引用（episodic_memory.vector_store）
+        try:
+            from web.backend.episodic_memory import vector_store as _evs
+            # 这些是函数内部 import 的，不需要 patch 模块级引用
+        except ImportError:
+            pass
+
+    except ImportError:
+        # pymilvus 未安装时跳过
+        pass
+
+    yield
+
+    # teardown: 断言没有违规调用
+    if attempted_calls:
+        names = list(dict.fromkeys(name for name, _, _ in attempted_calls))
+        pytest.fail(
+            "Unit test attempted forbidden Milvus operations: "
+            + ", ".join(names)
+        )
 
 
 def _enable_sqlite_foreign_keys(dbapi_conn, connection_record):

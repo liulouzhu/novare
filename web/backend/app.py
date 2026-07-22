@@ -165,6 +165,7 @@ from web.backend.routes.papers import router as papers_router  # noqa: E402
 from web.backend.routes.sessions import router as sessions_router  # noqa: E402
 from web.backend.routes.upload import router as upload_router  # noqa: E402
 from web.backend.routes.memories import router as memories_router  # noqa: E402
+from web.backend.routes.episodic_memories import router as episodic_memories_router  # noqa: E402
 
 app.include_router(auth_router)
 app.include_router(chat_router)
@@ -173,6 +174,7 @@ app.include_router(papers_router)
 app.include_router(graph_router)
 app.include_router(upload_router)
 app.include_router(memories_router)
+app.include_router(episodic_memories_router)
 
 
 @app.get("/api/health")

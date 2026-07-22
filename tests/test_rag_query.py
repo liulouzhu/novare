@@ -170,13 +170,14 @@ class TestHandleRagQueryFailClosed:
         }
         with patch.object(rq, "_get_user_paper_ids", return_value={"p1"}):
             with patch.object(rq, "embed_text_async", return_value=fake_vec):
-                with patch("tools.rag_query.get_embeddings_by_paper_ids", new_callable=AsyncMock, return_value=[fake_emb]):
-                    with patch("core.database.get_all_embeddings", new_callable=AsyncMock) as mock_all:
-                        result = _parse_result(
-                            await rq.handle_rag_query({"question": "test"}, user_id="u-1")
-                        )
-                        assert result["ok"] is True
-                        mock_all.assert_not_called()
+                with patch.object(rq, "_milvus_search", new_callable=AsyncMock, return_value=[]):
+                    with patch("tools.rag_query.get_embeddings_by_paper_ids", new_callable=AsyncMock, return_value=[fake_emb]):
+                        with patch("core.database.get_all_embeddings", new_callable=AsyncMock) as mock_all:
+                            result = _parse_result(
+                                await rq.handle_rag_query({"question": "test"}, user_id="u-1")
+                            )
+                            assert result["ok"] is True
+                            mock_all.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_allow_unscoped_permits_no_user_id(self):
@@ -193,14 +194,15 @@ class TestHandleRagQueryFailClosed:
         }
         try:
             with patch.object(rq, "embed_text_async", return_value=fake_vec):
-                with patch("core.database.get_all_embeddings", new_callable=AsyncMock, return_value=[fake_emb]):
-                    with patch("core.database.get_connection") as mock_conn:
-                        mock_conn.return_value.__aenter__ = AsyncMock()
-                        mock_conn.return_value.__aexit__ = AsyncMock(return_value=False)
-                        result = _parse_result(
-                            await rq.handle_rag_query({"question": "test"})
-                        )
-                        assert result["ok"] is True
+                with patch.object(rq, "_milvus_search", new_callable=AsyncMock, return_value=[]):
+                    with patch("core.database.get_all_embeddings", new_callable=AsyncMock, return_value=[fake_emb]):
+                        with patch("core.database.get_connection") as mock_conn:
+                            mock_conn.return_value.__aenter__ = AsyncMock()
+                            mock_conn.return_value.__aexit__ = AsyncMock(return_value=False)
+                            result = _parse_result(
+                                await rq.handle_rag_query({"question": "test"})
+                            )
+                            assert result["ok"] is True
         finally:
             rq.ALLOW_UNSCOPED = original
 
@@ -217,15 +219,16 @@ class TestHandleRagQueryFailClosed:
         }
         with patch.object(rq, "_get_user_paper_ids", return_value={"p1"}):
             with patch.object(rq, "embed_text_async", return_value=fake_vec):
-                with patch(
-                    "tools.rag_query.get_embeddings_by_paper_ids", new_callable=AsyncMock, return_value=[emb_p1]
-                ) as mock_scoped:
-                    result = _parse_result(
-                        await rq.handle_rag_query({"question": "test"}, user_id="u-1")
-                    )
-                    assert result["ok"] is True
-                    for r in result["data"]["results"]:
-                        assert r["paper_id"] == "p1"
+                with patch.object(rq, "_milvus_search", new_callable=AsyncMock, return_value=[]):
+                    with patch(
+                        "tools.rag_query.get_embeddings_by_paper_ids", new_callable=AsyncMock, return_value=[emb_p1]
+                    ) as mock_scoped:
+                        result = _parse_result(
+                            await rq.handle_rag_query({"question": "test"}, user_id="u-1")
+                        )
+                        assert result["ok"] is True
+                        for r in result["data"]["results"]:
+                            assert r["paper_id"] == "p1"
 
 
 # ── get_embeddings_by_paper_ids (database layer) ─────────────────────────

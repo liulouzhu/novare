@@ -72,6 +72,18 @@ class NovareConfig:
     turn_timeout: int = 300                 # 主 agent 单轮超时（默认 5 分钟）
     subagent_turn_timeout: int = 600        # 子智能体单轮超时（默认 10 分钟）
 
+    # 情景记忆（Episodic Memory）
+    episodic_memory_enabled: bool = False   # 默认关闭，向后兼容
+    episodic_memory_top_k: int = 5          # 检索返回条数
+    episodic_memory_min_importance: float = 0.6   # 最低重要性阈值
+    episodic_memory_min_confidence: float = 0.7   # 最低置信度阈值
+    episodic_memory_min_similarity: float = 0.55  # 最低语义相似度阈值
+    episodic_memory_max_per_turn: int = 3         # 每轮最多保存条数
+    episodic_memory_collection: str = "episodic_memories"  # Milvus collection 名
+
+    # 测试 embedding fallback（生产环境禁止启用）
+    test_embedding_fallback: bool = False
+
     @classmethod
     def load(cls, config_path: str | Path | None = None) -> "NovareConfig":
         """从 .env 文件、环境变量和配置文件加载配置"""
@@ -155,7 +167,47 @@ class NovareConfig:
         if preserve_recent:
             cfg.preserve_recent_messages = int(preserve_recent)
 
-        # 配置文件
+        # 情景记忆
+        ep_enabled = os.environ.get("NOVARE_EPISODIC_MEMORY_ENABLED")
+        if ep_enabled is not None:
+            cfg.episodic_memory_enabled = ep_enabled.lower() in ("1", "true", "yes")
+        ep_top_k = os.environ.get("NOVARE_EPISODIC_MEMORY_TOP_K")
+        if ep_top_k:
+            cfg.episodic_memory_top_k = int(ep_top_k)
+        ep_min_imp = os.environ.get("NOVARE_EPISODIC_MEMORY_MIN_IMPORTANCE")
+        if ep_min_imp:
+            cfg.episodic_memory_min_importance = float(ep_min_imp)
+        ep_min_conf = os.environ.get("NOVARE_EPISODIC_MEMORY_MIN_CONFIDENCE")
+        if ep_min_conf:
+            cfg.episodic_memory_min_confidence = float(ep_min_conf)
+        ep_max_turn = os.environ.get("NOVARE_EPISODIC_MEMORY_MAX_PER_TURN")
+        if ep_max_turn:
+            cfg.episodic_memory_max_per_turn = int(ep_max_turn)
+        ep_collection = os.environ.get("NOVARE_EPISODIC_MEMORY_COLLECTION")
+        if ep_collection:
+            cfg.episodic_memory_collection = ep_collection
+        ep_min_sim = os.environ.get("NOVARE_EPISODIC_MEMORY_MIN_SIMILARITY")
+        if ep_min_sim:
+            cfg.episodic_memory_min_similarity = float(ep_min_sim)
+
+        # 测试 embedding fallback
+        test_fallback = os.environ.get("NOVARE_TEST_EMBEDDING_FALLBACK")
+        if test_fallback is not None:
+            cfg.test_embedding_fallback = test_fallback.lower() in ("1", "true", "yes")
+
+        # 情景记忆配置校验
+        cfg.episodic_memory_top_k = max(1, min(20, cfg.episodic_memory_top_k))
+        cfg.episodic_memory_min_importance = max(0.0, min(1.0, cfg.episodic_memory_min_importance))
+        cfg.episodic_memory_min_confidence = max(0.0, min(1.0, cfg.episodic_memory_min_confidence))
+        cfg.episodic_memory_min_similarity = max(-1.0, min(1.0, cfg.episodic_memory_min_similarity))
+        cfg.episodic_memory_max_per_turn = max(1, min(10, cfg.episodic_memory_max_per_turn))
+        # Collection 名只允许安全字符
+        import re
+        if not re.match(r'^[a-zA-Z0-9_]+$', cfg.episodic_memory_collection):
+            raise ValueError(
+                f"Invalid episodic_memory_collection name: {cfg.episodic_memory_collection!r}. "
+                "Only alphanumeric characters and underscores are allowed."
+            )
         path = Path(config_path).resolve() if config_path else cfg.workspace / ".novare" / "config.json"
         if path.exists():
             try:

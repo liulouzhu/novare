@@ -231,3 +231,46 @@ class UserMemory(Base):
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
     user = relationship("User")
+
+
+class EpisodicMemory(Base):
+    """情景记忆 — 用户完成过的研究任务、决策、实验结果等。"""
+    __tablename__ = "episodic_memories"
+    __table_args__ = (
+        UniqueConstraint("user_id", "content_hash", name="uq_episodic_memory_hash"),
+        Index("idx_episodic_memories_user", "user_id"),
+        Index("idx_episodic_memories_session", "session_id"),
+        Index("idx_episodic_memories_status", "user_id", "status"),
+    )
+
+    id = Column(GUID(), primary_key=True, default=gen_uuid)
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False)
+    session_id = Column(String(64), nullable=True)
+
+    memory_type = Column(String(50), nullable=False)
+    summary = Column(String(500), nullable=False)
+    context = Column(Text, default="")
+    action = Column(Text, default="")
+    outcome = Column(Text, default="")
+
+    topics = Column(JSON_TYPE, default=list)
+    source_message_ids = Column(JSON_TYPE, default=list)
+
+    importance = Column(Float, default=0.5)
+    confidence = Column(Float, default=0.5)
+
+    content_hash = Column(String(64), nullable=False)
+    embedding_model = Column(String(100), default="")
+    vector_id = Column(String(64), nullable=True)
+    index_status = Column(String(20), nullable=False, default="pending")
+
+    status = Column(String(20), nullable=False, default="active")
+    pinned = Column(Boolean, default=False)
+
+    occurred_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    last_retrieved_at = Column(DateTime(timezone=True), nullable=True)
+    retrieval_count = Column(Integer, default=0)
+
+    user = relationship("User")
