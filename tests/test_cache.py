@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
+
 import pytest
 
 # mcp-server 工具需要 sys.path 中有 mcp-server 目录
@@ -436,7 +438,7 @@ class TestRagQueryCache:
         with patch("tools.rag_query.redis_service", mock_rs), \
              patch("tools.rag_query.embed_text_async", return_value=[0.1] * 384), \
              patch("tools.rag_query._get_user_paper_ids", return_value={"p1"}), \
-             patch("tools.rag_query._milvus_search", new_callable=AsyncMock, return_value=[]), \
+             patch("tools.rag_query._milvus_search", new_callable=AsyncMock, side_effect=Exception("Milvus unavailable")), \
              patch("tools.rag_query._brute_force_search", return_value=([
                  {"score": 0.9, "chunk_id": "c1", "text": "hello", "section": "Abs",
                   "paper_id": "p1", "title": "T"}
@@ -461,7 +463,7 @@ class TestRagQueryCache:
         with patch("tools.rag_query.redis_service", mock_rs), \
              patch("tools.rag_query.embed_text_async", return_value=[0.1] * 384), \
              patch("tools.rag_query._get_user_paper_ids", return_value={"p1"}), \
-             patch("tools.rag_query._milvus_search", new_callable=AsyncMock, return_value=[]), \
+             patch("tools.rag_query._milvus_search", new_callable=AsyncMock, side_effect=Exception("Milvus unavailable")), \
              patch("tools.rag_query._brute_force_search", return_value=([
                  {"score": 0.9, "chunk_id": "c1", "text": "hello", "section": "Abs",
                   "paper_id": "p1", "title": "T"}
@@ -481,7 +483,7 @@ class TestRagQueryCache:
         with patch("tools.rag_query.redis_service", None), \
              patch("tools.rag_query.embed_text_async", return_value=[0.1] * 384), \
              patch("tools.rag_query._get_user_paper_ids", return_value={"p1"}), \
-             patch("tools.rag_query._milvus_search", new_callable=AsyncMock, return_value=[]), \
+             patch("tools.rag_query._milvus_search", new_callable=AsyncMock, side_effect=Exception("Milvus unavailable")), \
              patch("tools.rag_query._brute_force_search", return_value=([
                  {"score": 0.9, "chunk_id": "c1", "text": "hello", "section": "Abs",
                   "paper_id": "p1", "title": "T"}
@@ -502,10 +504,10 @@ class TestRagQueryCache:
         with patch("tools.rag_query.redis_service", mock_rs), \
              patch("tools.rag_query.ALLOW_UNSCOPED", True), \
              patch("tools.rag_query.embed_text_async", return_value=[0.1] * 384), \
-             patch("tools.rag_query._milvus_search", new_callable=AsyncMock, return_value=[]), \
-             patch("core.database.get_all_embeddings", return_value=[
+             patch("tools.rag_query._milvus_search", new_callable=AsyncMock, side_effect=Exception("Milvus unavailable")), \
+             patch("tools.rag_query.get_embeddings_by_paper_ids", new_callable=AsyncMock, return_value=[
                  {"chunk_id": "c1", "text": "hello", "section": "Abs",
-                  "paper_id": "p1", "title": "T", "vec": [0.1] * 384}
+                  "paper_id": "p1", "title": "T", "vec": np.array([0.1] * 384, dtype=np.float32)}
              ]), \
              patch("tools.rag_query.get_connection"):
             from tools.rag_query import handle_rag_query
@@ -526,7 +528,7 @@ class TestRagQueryCache:
         with patch("tools.rag_query.redis_service", mock_rs), \
              patch("tools.rag_query.embed_text_async", return_value=[0.1] * 384), \
              patch("tools.rag_query._get_user_paper_ids", return_value={"p1"}), \
-             patch("tools.rag_query._milvus_search", new_callable=AsyncMock, return_value=[]), \
+             patch("tools.rag_query._milvus_search", new_callable=AsyncMock, side_effect=Exception("Milvus unavailable")), \
              patch("tools.rag_query._brute_force_search", return_value=([
                  {"score": 0.9, "chunk_id": "c1", "text": "hello", "section": "Abs",
                   "paper_id": "p1", "title": "T"}
@@ -568,7 +570,7 @@ class TestRagQueryCache:
         with patch("tools.rag_query.redis_service", mock_rs), \
              patch("tools.rag_query.embed_text_async", return_value=[0.1] * 384), \
              patch("tools.rag_query._get_user_paper_ids", return_value={"p1"}), \
-             patch("tools.rag_query._milvus_search", new_callable=AsyncMock, return_value=[]), \
+             patch("tools.rag_query._milvus_search", new_callable=AsyncMock, side_effect=Exception("Milvus unavailable")), \
              patch("tools.rag_query._brute_force_search", return_value=([
                  {"score": 0.9, "chunk_id": "c1", "text": "hello", "section": "Abs",
                   "paper_id": "p1", "title": "T"}
@@ -607,7 +609,7 @@ class TestRagQueryCache:
         with patch("tools.rag_query.redis_service", mock_rs), \
              patch("tools.rag_query.embed_text_async", return_value=[0.1] * 384), \
              patch("tools.rag_query._get_user_paper_ids", return_value={"p1"}), \
-             patch("tools.rag_query._milvus_search", new_callable=AsyncMock, return_value=[]), \
+             patch("tools.rag_query._milvus_search", new_callable=AsyncMock, side_effect=Exception("Milvus unavailable")), \
              patch("tools.rag_query._brute_force_search", return_value=([
                  {"score": 0.8, "chunk_id": "c1", "text": "b", "section": "Abs",
                   "paper_id": "p1", "title": "T"}

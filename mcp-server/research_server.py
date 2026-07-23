@@ -89,7 +89,16 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     "question": {"type": "string", "description": "自然语言问题"},
-                    "top_k": {"type": "integer", "description": "返回结果数量，默认 5"},
+                    "top_k": {"type": "integer", "description": "返回结果数量（1-50），默认 5"},
+                    "paper_id": {
+                        "type": "string",
+                        "description": "限定在指定论文中检索（与 paper_ids 二选一）",
+                    },
+                    "paper_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "限定在指定论文列表中检索（与 paper_id 二选一）",
+                    },
                 },
                 "required": ["question"],
             },

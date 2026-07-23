@@ -170,7 +170,7 @@ class TestHandleRagQueryFailClosed:
         }
         with patch.object(rq, "_get_user_paper_ids", return_value={"p1"}):
             with patch.object(rq, "embed_text_async", return_value=fake_vec):
-                with patch.object(rq, "_milvus_search", new_callable=AsyncMock, return_value=[]):
+                with patch.object(rq, "_milvus_search", new_callable=AsyncMock, side_effect=Exception("Milvus down")):
                     with patch("tools.rag_query.get_embeddings_by_paper_ids", new_callable=AsyncMock, return_value=[fake_emb]):
                         with patch("core.database.get_all_embeddings", new_callable=AsyncMock) as mock_all:
                             result = _parse_result(
@@ -194,9 +194,9 @@ class TestHandleRagQueryFailClosed:
         }
         try:
             with patch.object(rq, "embed_text_async", return_value=fake_vec):
-                with patch.object(rq, "_milvus_search", new_callable=AsyncMock, return_value=[]):
+                with patch.object(rq, "_milvus_search", new_callable=AsyncMock, side_effect=Exception("Milvus down")):
                     with patch("core.database.get_all_embeddings", new_callable=AsyncMock, return_value=[fake_emb]):
-                        with patch("core.database.get_connection") as mock_conn:
+                        with patch("tools.rag_query.get_connection") as mock_conn:
                             mock_conn.return_value.__aenter__ = AsyncMock()
                             mock_conn.return_value.__aexit__ = AsyncMock(return_value=False)
                             result = _parse_result(
@@ -219,7 +219,7 @@ class TestHandleRagQueryFailClosed:
         }
         with patch.object(rq, "_get_user_paper_ids", return_value={"p1"}):
             with patch.object(rq, "embed_text_async", return_value=fake_vec):
-                with patch.object(rq, "_milvus_search", new_callable=AsyncMock, return_value=[]):
+                with patch.object(rq, "_milvus_search", new_callable=AsyncMock, side_effect=Exception("Milvus down")):
                     with patch(
                         "tools.rag_query.get_embeddings_by_paper_ids", new_callable=AsyncMock, return_value=[emb_p1]
                     ) as mock_scoped:

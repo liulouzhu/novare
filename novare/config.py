@@ -236,13 +236,41 @@ class NovareConfig:
                 venv_python = project_root / ".venv" / "bin" / "python"
             mcp_server_py = project_root / "mcp-server" / "research_server.py"
             if venv_python.exists() and mcp_server_py.exists():
+                # 显式 allowlist：只传递 MCP 子进程所需的环境变量
+                mcp_env: dict[str, str] = {
+                    "RESEARCH_DATA_DIR": str(cfg.data_dir),
+                    "DATABASE_URL": os.environ.get("DATABASE_URL", ""),
+                }
+                # Embedding 配置
+                for key in ("DASHSCOPE_API_KEY", "EMBEDDING_BASE_URL", "EMBEDDING_MODEL"):
+                    val = os.environ.get(key)
+                    if val:
+                        mcp_env[key] = val
+                # Milvus 配置
+                for key in ("MILVUS_HOST", "MILVUS_PORT"):
+                    val = os.environ.get(key)
+                    if val:
+                        mcp_env[key] = val
+                # RAG 配置
+                for key in ("RAG_DEFAULT_USER", "RAG_ALLOW_UNSCOPED", "NOVARE_TEST_EMBEDDING_FALLBACK"):
+                    val = os.environ.get(key)
+                    if val:
+                        mcp_env[key] = val
+                # Elasticsearch 配置
+                for key in ("ELASTICSEARCH_URL", "ELASTICSEARCH_INDEX",
+                            "ELASTICSEARCH_USERNAME", "ELASTICSEARCH_PASSWORD",
+                            "RAG_VECTOR_TOP_N", "RAG_KEYWORD_TOP_N", "RAG_RRF_K",
+                            "RAG_RERANK_ENABLED", "RAG_RERANK_API_KEY",
+                            "RAG_RERANK_URL", "RAG_RERANK_MODEL",
+                            "RAG_RERANK_CANDIDATES", "RAG_RERANK_TIMEOUT",
+                            "RAG_RERANK_MAX_DOC_CHARS"):
+                    val = os.environ.get(key)
+                    if val:
+                        mcp_env[key] = val
                 cfg.mcp_servers["research"] = McpServerConfig(
                     command=str(venv_python),
                     args=[str(mcp_server_py)],
-                    env={
-                        "RESEARCH_DATA_DIR": str(cfg.data_dir),
-                        "DATABASE_URL": os.environ["DATABASE_URL"],
-                    },
+                    env=mcp_env,
                 )
 
         # 默认系统提示词

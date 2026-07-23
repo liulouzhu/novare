@@ -12,6 +12,8 @@ data/
 docs/
 research-agent-design.md
 novare_test_harness.py
+exported_papers/
+scripts/
 
 # Frontend
 web/frontend/node_modules/

@@ -2,8 +2,14 @@
 
 Provides insert/search operations with per-user partition key isolation.
 Falls back gracefully when Milvus is unavailable.
+
+Dimension safety:
+- insert_vectors validates that embedding dimension matches EMBEDDING_DIM
+- search_vectors can filter by paper_id in addition to user_id
+- Schema compatibility check on collection load
 """
 
+import json
 import os
 import logging
 
@@ -22,6 +28,11 @@ MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
 MILVUS_PORT = int(os.getenv("MILVUS_PORT", "19530"))
 COLLECTION_NAME = "paper_chunks"
 EMBEDDING_DIM = 1024  # Match DashScope text-embedding-v4
+
+
+class DimensionMismatchError(Exception):
+    """向量维度与 collection schema 不一致"""
+    pass
 
 
 def connect_milvus() -> None:
@@ -45,11 +56,46 @@ def _ensure_connected() -> None:
             raise
 
 
+def _check_schema_compatibility(collection: Collection) -> int:
+    """检查 collection schema 中 embedding 字段的维度，返回维度值。
+
+    如果 schema 不兼容（如缺少 embedding 字段），抛出异常。
+    """
+    schema = collection.schema
+    for field in schema.fields:
+        if field.name == "embedding":
+            params = field.params
+            dim = params.get("dim", 0)
+            if dim != EMBEDDING_DIM:
+                logger.warning(
+                    "Milvus schema dimension mismatch: collection has dim=%d, "
+                    "expected dim=%d. Consider rebuilding the collection.",
+                    dim, EMBEDDING_DIM,
+                )
+            return dim
+    raise DimensionMismatchError(
+        "Milvus collection 'paper_chunks' schema missing 'embedding' field. "
+        "The collection may need to be recreated."
+    )
+
+
 def ensure_collection() -> Collection:
     """Get or create the paper_chunks collection with proper schema and index."""
     _ensure_connected()
     if utility.has_collection(COLLECTION_NAME):
-        return Collection(COLLECTION_NAME)
+        collection = Collection(COLLECTION_NAME)
+        # 检查 schema 兼容性
+        try:
+            actual_dim = _check_schema_compatibility(collection)
+            if actual_dim != EMBEDDING_DIM:
+                logger.warning(
+                    "Milvus collection dimension (%d) differs from expected (%d). "
+                    "Queries may fail. Rebuild collection to fix.",
+                    actual_dim, EMBEDDING_DIM,
+                )
+        except Exception as e:
+            logger.warning("Failed to check Milvus schema: %s", e)
+        return collection
 
     fields = [
         FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True, max_length=128),
@@ -74,7 +120,7 @@ def ensure_collection() -> Collection:
             "params": {"nlist": 128},
         },
     )
-    logger.info("Created Milvus collection: %s", COLLECTION_NAME)
+    logger.info("Created Milvus collection: %s (dim=%d)", COLLECTION_NAME, EMBEDDING_DIM)
     return collection
 
 
@@ -93,7 +139,19 @@ def insert_vectors(
         chunk_ids: Integer chunk IDs (matching SQLite chunks table).
         texts: Chunk text content.
         embeddings: Corresponding embedding vectors.
+
+    Raises:
+        DimensionMismatchError: If any embedding dimension doesn't match EMBEDDING_DIM.
     """
+    # 维度校验
+    for i, emb in enumerate(embeddings):
+        if len(emb) != EMBEDDING_DIM:
+            raise DimensionMismatchError(
+                f"Embedding dimension mismatch at index {i}: "
+                f"got {len(emb)}, expected {EMBEDDING_DIM}. "
+                f"Check DASHSCOPE_API_KEY and EMBEDDING_MODEL configuration."
+            )
+
     collection = ensure_collection()
     ids = [f"{user_id}_{paper_id}_{cid}" for cid in chunk_ids]
     data = [
@@ -107,7 +165,8 @@ def insert_vectors(
     collection.insert(data)
     collection.flush()
     logger.info(
-        "Inserted %d vectors for user=%s paper=%s", len(ids), user_id, paper_id
+        "Inserted %d vectors for user=%s paper=%s (dim=%d)",
+        len(ids), user_id, paper_id, EMBEDDING_DIM,
     )
 
 
@@ -115,25 +174,48 @@ def search_vectors(
     user_id: str,
     query_embedding: list[float],
     top_k: int = 5,
+    paper_ids: list[str] | None = None,
 ) -> list[dict]:
-    """Search for similar chunk vectors scoped to a user.
+    """Search for similar chunk vectors scoped to a user, optionally filtered by paper_ids.
 
     Args:
         user_id: Partition key to scope search.
         query_embedding: Query vector.
         top_k: Number of results to return.
+        paper_ids: Optional list of paper IDs to filter by.
 
     Returns:
         List of hit dicts with keys: id, score, paper_id, chunk_id, text.
+
+    Raises:
+        DimensionMismatchError: If query embedding dimension doesn't match collection schema.
     """
+    # 查询向量维度校验
+    if len(query_embedding) != EMBEDDING_DIM:
+        raise DimensionMismatchError(
+            f"Query embedding dimension mismatch: got {len(query_embedding)}, "
+            f"expected {EMBEDDING_DIM}. "
+            f"Index vectors are {EMBEDDING_DIM}D. "
+            f"Please restore the original embedding configuration or rebuild the index."
+        )
+
     collection = ensure_collection()
     collection.load()
+
+    # 构建过滤表达式（使用 json.dumps 安全转义字符串）
+    expr_parts = [f"user_id == {json.dumps(user_id)}"]
+    if paper_ids:
+        # Milvus expression: paper_id in ["id1", "id2", ...]
+        encoded_ids = ", ".join(json.dumps(pid) for pid in paper_ids)
+        expr_parts.append(f"paper_id in [{encoded_ids}]")
+    expr = " and ".join(expr_parts)
+
     results = collection.search(
         data=[query_embedding],
         anns_field="embedding",
         param={"metric_type": "COSINE", "params": {"nprobe": 16}},
         limit=top_k,
-        expr=f'user_id == "{user_id}"',
+        expr=expr,
         output_fields=["paper_id", "chunk_id", "text"],
     )
     hits = []

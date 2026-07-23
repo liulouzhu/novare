@@ -107,6 +107,16 @@ async def main():
 
     # 连接 MCP 服务器（研究工具）
     mcp_clients: list[McpClient] = []
+    # CLI 模式下从环境变量读取 user_id，注入到所有 MCP 工具调用
+    cli_user_id = os.environ.get("NOVARE_USER_ID")
+    if cli_user_id:
+        logger.info("CLI user_id: %s (from NOVARE_USER_ID)", cli_user_id[:8] + "...")
+    else:
+        logger.info(
+            "NOVARE_USER_ID not set — RAG research tools will be unavailable. "
+            "Set NOVARE_USER_ID to your user UUID to enable RAG retrieval."
+        )
+
     for name, srv_config in config.mcp_servers.items():
         logger.info("Connecting to MCP server: %s", name)
         client = McpClient(
@@ -120,12 +130,16 @@ async def main():
             for tool in tools:
                 tool_name = tool["name"]
 
-                async def make_handler(c: McpClient, tn: str):
+                async def make_handler(c: McpClient, tn: str, uid: str | None):
                     async def handler(args, workspace=None):
-                        return await c.call_tool(tn, args)
+                        # 注入 _user_id（来自可信 tool context，模型无法覆盖）
+                        payload = dict(args)
+                        if uid:
+                            payload["_user_id"] = uid
+                        return await c.call_tool(tn, payload)
                     return handler
 
-                handler = await make_handler(client, tool_name)
+                handler = await make_handler(client, tool_name, cli_user_id)
                 tool_registry.register_tool(ToolDef(
                     name=tool_name,
                     description=tool.get("description", ""),

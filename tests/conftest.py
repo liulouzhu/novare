@@ -122,6 +122,17 @@ def forbid_real_milvus_network(monkeypatch):
         )
 
 
+@pytest.fixture(autouse=True)
+def mock_es_search_for_tests():
+    """默认单元测试禁止连接真实 Elasticsearch。
+
+    mock _es_search 返回空结果元组，避免测试中触发 ES 连接。
+    """
+    from unittest.mock import patch, AsyncMock
+    with patch("tools.rag_query._es_search", new_callable=AsyncMock, return_value=([], True, None)):
+        yield
+
+
 def _enable_sqlite_foreign_keys(dbapi_conn, connection_record):
     """在 SQLite 连接上启用外键约束。"""
     cursor = dbapi_conn.cursor()

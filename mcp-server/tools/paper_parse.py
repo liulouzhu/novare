@@ -17,7 +17,8 @@ from core.database import (
     insert_citation,
     upsert_paper,
 )
-from core.embedding import embed_batch_async
+from core.embedding import embed_batch_async, get_embedding_dim, EmbeddingProviderError
+from core.paper_id import canonicalize_paper_id
 from core.pdf_parser import (
     split_into_sections,
     chunk_text,
@@ -231,6 +232,10 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
     pdf_url = args.get("pdf_url")
     file_path = args.get("file_path")
 
+    # 规范化 paper_id（arXiv ID 统一格式）
+    if paper_id:
+        paper_id = canonicalize_paper_id(paper_id)
+
     if not paper_id and not pdf_url and not file_path:
         return fail("paper_parse", "请提供 paper_id、pdf_url 或 file_path。")
 
@@ -345,16 +350,43 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
         return fail("paper_parse", "分块结果为空。")
 
     # 向量化
+    embeddings = None
     try:
         texts = [c["text"] for c in all_chunks]
         embeddings = await embed_batch_async(texts)
-        # 校验向量维度
-        if embeddings and len(embeddings[0]) != 1024:
-            actual_dim = len(embeddings[0])
-            logger.warning(
-                "Embedding dimension mismatch: got %d, expected 1024. "
-                "Milvus insertion will fail. Check DASHSCOPE_API_KEY.", actual_dim
+
+        # ── 维度一致性校验 ──
+        expected_dim = get_embedding_dim()
+        if not embeddings:
+            logger.warning("Embedding returned empty list")
+            embeddings = None
+        elif len(embeddings) != len(all_chunks):
+            logger.error(
+                "Embedding count mismatch: got %d embeddings for %d chunks. "
+                "Refusing to write inconsistent data.", len(embeddings), len(all_chunks)
             )
+            embeddings = None
+        else:
+            # 检查所有向量维度一致
+            dims = {len(e) for e in embeddings}
+            if len(dims) != 1:
+                logger.error(
+                    "Inconsistent embedding dimensions within batch: %s. "
+                    "Refusing to write inconsistent data.", dims
+                )
+                embeddings = None
+            elif list(dims)[0] != expected_dim:
+                actual_dim = list(dims)[0]
+                logger.error(
+                    "Embedding dimension mismatch: got %d, expected %d "
+                    "(provider declares dim=%d). Refusing to write. "
+                    "Check DASHSCOPE_API_KEY and EMBEDDING_MODEL.",
+                    actual_dim, expected_dim, expected_dim,
+                )
+                embeddings = None
+    except EmbeddingProviderError as e:
+        logger.error("No embedding provider available: %s", e)
+        return fail("paper_parse", str(e))
     except Exception as e:
         logger.warning("Embedding failed, saving chunks without vectors: %s", e)
         embeddings = None
@@ -414,7 +446,44 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
 
     # 同步写入 Milvus（如果可用）
     if embeddings and chunk_ids:
-        _milvus_insert(resolved_paper_id, chunk_ids, all_chunks, embeddings, user_id=user_id)
+        try:
+            _milvus_insert(resolved_paper_id, chunk_ids, all_chunks, embeddings, user_id=user_id)
+        except Exception as e:
+            # DimensionMismatchError 等已由 _milvus_insert 内部记录
+            logger.warning("Milvus insertion failed (non-fatal): %s", e)
+
+    # 同步写入 Elasticsearch（如果可用）
+    es_indexed_count = 0
+    es_warnings: list[str] = []
+    if chunk_ids and resolved_paper_id:
+        try:
+            from core.elasticsearch_store import bulk_upsert_chunks
+            # 获取论文标题
+            _es_title = resolved_paper_id
+            async with get_connection() as _es_conn:
+                _es_paper = await get_paper(_es_conn, resolved_paper_id)
+                if _es_paper:
+                    _es_title = _es_paper.get("title", resolved_paper_id)
+            es_docs = []
+            for i, chunk_id in enumerate(chunk_ids):
+                sec = all_chunks[i]["section"] if i < len(all_chunks) else ""
+                txt = all_chunks[i]["text"] if i < len(all_chunks) else ""
+                es_docs.append({
+                    "chunk_id": chunk_id,
+                    "paper_id": resolved_paper_id,
+                    "title": _es_title,
+                    "section": sec,
+                    "text": txt,
+                })
+            es_result = await bulk_upsert_chunks(es_docs)
+            es_indexed_count = es_result.get("success", 0)
+            if es_result.get("errors"):
+                es_warnings.extend([f"ES: {e}" for e in es_result["errors"]])
+            if es_indexed_count > 0:
+                logger.info("ES indexed %d chunks for paper %s", es_indexed_count, resolved_paper_id)
+        except Exception as e:
+            es_warnings.append(f"Elasticsearch insertion failed: {e}")
+            logger.warning("Elasticsearch insertion failed (non-fatal): %s", e)
 
     # 关联用户与论文（PostgreSQL）
     if resolved_paper_id:
@@ -462,6 +531,7 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
         "chunk_count": len(all_chunks),
         "embedding_done": bool(embeddings),
         "citations_count": citations_added,
+        "elasticsearch_indexed": es_indexed_count,
         "sections_preview": sections_preview,
         "references_preview": references_preview,
         "kg": kg_stats,
@@ -474,6 +544,7 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
         data,
         summary=f"论文 {resolved_paper_id} 解析完成：{len(sections)} 章节, {len(all_chunks)} 分块, {citations_added} 引用",
         sources=[{"id": resolved_paper_id, "title": title or resolved_paper_id}],
+        warnings=es_warnings,
     )
 
 
