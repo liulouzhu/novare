@@ -165,6 +165,15 @@ export async function renameSession(sessionId: string, title: string): Promise<v
   if (!res.ok) { handleAuthError(res); throw new Error('Failed to rename session') }
 }
 
+export async function flushMemoryExtraction(sessionId: string): Promise<{ status: string }> {
+  const res = await fetch(`${BASE}/api/sessions/${sessionId}/memory/flush`, {
+    method: 'POST',
+    headers: authHeaders(),
+  })
+  if (!res.ok) { handleAuthError(res); throw new Error('Failed to flush memory extraction') }
+  return res.json()
+}
+
 // ── Papers ──
 
 export async function fetchPapers(params?: { q?: string; is_parsed?: boolean }): Promise<Paper[]> {

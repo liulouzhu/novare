@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 import asyncio
+import enum
 import logging
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -19,9 +21,33 @@ if TYPE_CHECKING:
     from web.backend.memory_service import MemoryServiceAsync
     from web.backend.episodic_memory.service import EpisodicMemoryService
 
-from .extractor import UnifiedMemoryExtractor
+from .extractor import UnifiedMemoryExtractor, ExtractionParseError
 
 logger = logging.getLogger("novare.memory_extraction.coordinator")
+
+
+class ExtractionStatus(str, enum.Enum):
+    """记忆提取的结构化状态。"""
+    SUCCESS = "success"
+    EXTRACTION_FAILED = "extraction_failed"
+    PROFILE_PERSIST_FAILED = "profile_persist_failed"
+    EPISODIC_PERSIST_FAILED = "episodic_persist_failed"
+    BOTH_PERSIST_FAILED = "both_persist_failed"
+
+
+@dataclass
+class ExtractionResult:
+    """记忆提取的结构化返回结果。"""
+    status: ExtractionStatus = ExtractionStatus.SUCCESS
+    profile_saved: int = 0
+    episodes_saved: int = 0
+    episodes_indexed: int = 0
+    episodes_index_failed: int = 0
+
+    @property
+    def should_advance_cursor(self) -> bool:
+        """是否应推进游标。只有 SUCCESS 才推进。"""
+        return self.status == ExtractionStatus.SUCCESS
 
 
 class MemoryExtractionCoordinator:
@@ -43,26 +69,13 @@ class MemoryExtractionCoordinator:
         session_id: str,
         messages: list[dict],
         llm_client: LLMClient,
-    ) -> dict:
+    ) -> ExtractionResult:
         """统一提取并持久化记忆。
 
         Returns:
-            内部结果字典，仅用于日志/测试：
-            {
-                "profile_saved": int,
-                "episodes_saved": int,
-                "episodes_indexed": int,
-                "episodes_index_failed": int,
-                "warnings": list[str]
-            }
+            ExtractionResult with typed status and counts.
         """
-        result: dict = {
-            "profile_saved": 0,
-            "episodes_saved": 0,
-            "episodes_indexed": 0,
-            "episodes_index_failed": 0,
-            "warnings": [],
-        }
+        result = ExtractionResult()
 
         extract_profile = self._memory_service is not None
         extract_episodes = (
@@ -97,14 +110,21 @@ class MemoryExtractionCoordinator:
                 extract_episodes=extract_episodes,
                 max_episodes=max_episodes,
             )
+        except ExtractionParseError:
+            logger.warning("Unified memory extraction parse failed for user %s", user_id)
+            result.status = ExtractionStatus.EXTRACTION_FAILED
+            return result
         except Exception:
             logger.exception("Unified memory extraction failed for user %s", user_id)
-            result["warnings"].append("extraction_failed")
+            result.status = ExtractionStatus.EXTRACTION_FAILED
             return result
 
         # ── 分别持久化，失败隔离 ──
+        profile_failed = False
+        episodic_failed = False
+
         async def _save_profile():
-            nonlocal result
+            nonlocal profile_failed
             if not extract_profile or not extraction.profile_updates:
                 return
             try:
@@ -112,14 +132,13 @@ class MemoryExtractionCoordinator:
                     user_id=user_id,
                     candidates=extraction.profile_updates,
                 )
-                result["profile_saved"] = len(saved)
+                result.profile_saved = len(saved)
             except Exception:
                 logger.exception("Profile persistence failed for user %s", user_id)
-                if "profile_persist_failed" not in result["warnings"]:
-                    result["warnings"].append("profile_persist_failed")
+                profile_failed = True
 
         async def _save_episodes():
-            nonlocal result
+            nonlocal episodic_failed
             if not extract_episodes or not extraction.episodes:
                 return
             try:
@@ -128,21 +147,17 @@ class MemoryExtractionCoordinator:
                     session_id=session_id,
                     candidates=extraction.episodes,
                 )
-                result["episodes_saved"] = len(saved)
+                result.episodes_saved = len(saved)
                 # 统计 index_status
                 for rec in saved:
                     status = rec.get("index_status", "")
                     if status == "indexed":
-                        result["episodes_indexed"] += 1
+                        result.episodes_indexed += 1
                     elif status == "failed":
-                        result["episodes_index_failed"] += 1
-                if result["episodes_index_failed"] > 0:
-                    if "episodic_index_failed" not in result["warnings"]:
-                        result["warnings"].append("episodic_index_failed")
+                        result.episodes_index_failed += 1
             except Exception:
                 logger.exception("Episodic persistence failed for user %s", user_id)
-                if "episodic_persist_failed" not in result["warnings"]:
-                    result["warnings"].append("episodic_persist_failed")
+                episodic_failed = True
 
         # 两个存储服务失败隔离
         profile_result, episode_result = await asyncio.gather(
@@ -153,25 +168,34 @@ class MemoryExtractionCoordinator:
 
         if isinstance(profile_result, Exception):
             logger.exception("Profile persistence raised for user %s", user_id)
-            if "profile_persist_failed" not in result["warnings"]:
-                result["warnings"].append("profile_persist_failed")
+            profile_failed = True
         if isinstance(episode_result, Exception):
             logger.exception("Episodic persistence raised for user %s", user_id)
-            if "episodic_persist_failed" not in result["warnings"]:
-                result["warnings"].append("episodic_persist_failed")
+            episodic_failed = True
 
-        # 结构化日志（不记录完整候选、对话或已有画像）
-        if result["warnings"]:
+        # 确定最终状态
+        if profile_failed and episodic_failed:
+            result.status = ExtractionStatus.BOTH_PERSIST_FAILED
+        elif profile_failed:
+            result.status = ExtractionStatus.PROFILE_PERSIST_FAILED
+        elif episodic_failed:
+            result.status = ExtractionStatus.EPISODIC_PERSIST_FAILED
+        else:
+            result.status = ExtractionStatus.SUCCESS
+
+        # 结构化日志
+        if result.status != ExtractionStatus.SUCCESS:
             logger.warning(
-                "Memory extraction completed with warnings for user %s: %s",
+                "Memory extraction completed with status %s for user %s",
+                result.status.value,
                 user_id,
-                "; ".join(result["warnings"]),
             )
-        logger.info(
-            "Memory extraction completed for user %s: profile_saved=%d, episodes_saved=%d",
-            user_id,
-            result["profile_saved"],
-            result["episodes_saved"],
-        )
+        else:
+            logger.info(
+                "Memory extraction completed for user %s: profile_saved=%d, episodes_saved=%d",
+                user_id,
+                result.profile_saved,
+                result.episodes_saved,
+            )
 
         return result

@@ -132,14 +132,100 @@ async def delete_session(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """删除会话及关联消息"""
+    """删除会话及关联消息。
+
+    时序：
+    1. 验证 session 存在且属于当前用户
+    2. 通知 Scheduler forget_session（等待运行中任务停止）
+    3. forget 成功后才执行数据库删除并 commit
+    4. forget 失败时返回 503，不删除 session
+    """
+    # 1. 验证 session 存在
     session_repo = SessionRepository(db, user.id)
-    deleted = await session_repo.delete(session_id)
-    if not deleted:
+    session_model = await session_repo.get_by_id(session_id)
+    if not session_model:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    msg_repo = MessageRepository(db, user.id)
-    await msg_repo.delete_by_session(session_id)
+    # 所有权查询已经完成；等待后台任务期间不占用数据库连接。
+    await db.rollback()
 
-    await db.commit()
+    # 2. 通知 Scheduler 停止运行中的任务
+    scheduler = None
+    try:
+        from web.backend.app import agent_service
+        scheduler = agent_service.memory_scheduler
+        if scheduler:
+            stopped = await scheduler.forget_session(
+                str(user.id), session_id
+            )
+            if not stopped:
+                logger.warning(
+                    "Session %s: forget_session could not stop all tasks within timeout",
+                    session_id,
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail="Memory extraction task could not be stopped. Please retry.",
+                )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("forget_session failed for session %s", session_id)
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to stop memory extraction. Please retry.",
+        )
+
+    # 3. forget 成功后才删除数据库记录
+    try:
+        msg_repo = MessageRepository(db, user.id)
+        await msg_repo.delete_by_session(session_id)
+        deleted = await session_repo.delete(session_id)
+        if not deleted:
+            await db.rollback()
+            if scheduler:
+                scheduler.restore_session(session_id)
+            raise HTTPException(status_code=404, detail="Session not found")
+        await db.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        await db.rollback()
+        if scheduler:
+            scheduler.restore_session(session_id)
+        logger.exception("Failed to delete session %s after scheduler cleanup", session_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete session. Please retry.",
+        )
+
     return {"ok": True}
+
+
+@router.post("/{session_id}/memory/flush")
+async def flush_memory_extraction(
+    session_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Flush 指定会话的待提取消息（用于会话切换）。
+
+    验证 session 属于当前用户（防 IDOR）。
+    不等待 LLM 执行完成，立即返回调度状态。
+    """
+    # 验证 session 归属（防 IDOR）
+    session_repo = SessionRepository(db, user.id)
+    session_model = await session_repo.get_by_id(session_id)
+    if not session_model:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    from web.backend.app import agent_service
+    if not agent_service.memory_scheduler:
+        return {"status": "no_pending"}
+
+    status = await agent_service.memory_scheduler.flush_session(
+        user_id=str(user.id),
+        session_id=session_id,
+        reason="switch",
+    )
+    return {"status": status}

@@ -23,6 +23,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("novare.memory_extraction.extractor")
 
+
+class ExtractionParseError(Exception):
+    """Raised when LLM output cannot be parsed as valid extraction JSON.
+
+    This is distinct from empty results: if the LLM returns valid JSON with
+    empty arrays, that's a successful extraction with no memories. This
+    exception signals that the output was malformed or used an unsupported
+    schema version.
+    """
+
 # ── 数组长度上限 ──────────────────────────────────────────────
 
 _MAX_PROFILE_CANDIDATES = 10
@@ -319,14 +329,14 @@ class UnifiedMemoryExtractor:
             )
             if '{' in outside_fence or '[' in outside_fence:
                 logger.warning("Rejected: additional JSON structure outside fenced block")
-                return UnifiedMemoryExtractionResult()
+                raise ExtractionParseError("Additional JSON structure outside fenced block")
             fenced = fence_match.group(1).strip()
             result = self._try_parse_json(fenced, extract_profile, extract_episodes)
             if result is not None:
                 return result
         elif len(fence_matches) > 1:
             logger.warning("Rejected: multiple fenced JSON blocks in LLM output")
-            return UnifiedMemoryExtractionResult()
+            raise ExtractionParseError("Multiple fenced JSON blocks in LLM output")
 
         # 策略 3: raw_decode — 从第一个 '{' 开始提取，严格检查所有剩余文本
         first_brace = content.find('{')
@@ -339,18 +349,18 @@ class UnifiedMemoryExtractor:
                     # 严格检查：剩余文本中任何位置出现 '{' 或 '[' 都拒绝
                     if '{' in remaining or '[' in remaining:
                         logger.warning("Rejected: additional JSON structure in remaining text")
-                        return UnifiedMemoryExtractionResult()
+                        raise ExtractionParseError("Additional JSON structure in remaining text")
                     # 也检查前导文本中是否还有其他 JSON 起始结构
                     prefix = content[:first_brace]
                     if '{' in prefix or '[' in prefix:
                         logger.warning("Rejected: additional JSON structure in prefix text")
-                        return UnifiedMemoryExtractionResult()
+                        raise ExtractionParseError("Additional JSON structure in prefix text")
                     return self._build_result(raw_obj, extract_profile, extract_episodes)
             except (json.JSONDecodeError, ValueError, StopIteration):
                 pass
 
         logger.warning("Failed to parse unified memory extraction result")
-        return UnifiedMemoryExtractionResult()
+        raise ExtractionParseError("LLM output could not be parsed as valid extraction JSON")
 
     def _try_parse_json(
         self,
@@ -386,7 +396,7 @@ class UnifiedMemoryExtractor:
             UnifiedMemoryExtractionResult(schema_version=raw_version)
         except Exception:
             logger.warning("Unsupported schema_version: %s", raw_version)
-            return UnifiedMemoryExtractionResult()
+            raise ExtractionParseError(f"Unsupported schema_version: {raw_version}")
 
         profile_updates: list[ProfileMemoryCandidate] = []
         episodes: list[EpisodicMemoryExtract] = []

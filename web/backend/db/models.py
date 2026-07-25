@@ -147,6 +147,11 @@ class SessionModel(Base):
     title = Column(Text, default="New Chat")
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    # 批量记忆提取游标
+    last_extracted_message_id = Column(Integer, nullable=True)
+    last_memory_extracted_at = Column(DateTime(timezone=True), nullable=True)
+
     user = relationship("User")
 
 

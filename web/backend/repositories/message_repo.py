@@ -20,6 +20,35 @@ class MessageRepository(BaseRepository):
         await self.db.flush()
         return msg
 
+    async def get_messages_after(
+        self, session_id: str, last_message_id: int | None
+    ) -> list[MessageModel]:
+        """返回 last_message_id 之后的所有消息（按 id 排序）。
+
+        last_message_id 为 None 时返回会话所有消息。
+        仅返回属于当前用户的 session 的消息。
+        """
+        # 验证 session 归属
+        result = await self.db.execute(
+            select(SessionModel.id).where(
+                SessionModel.id == session_id,
+                SessionModel.user_id == self.user_id,
+            )
+        )
+        if result.scalar_one_or_none() is None:
+            return []
+
+        stmt = (
+            select(MessageModel)
+            .where(MessageModel.session_id == session_id)
+            .order_by(MessageModel.id)
+        )
+        if last_message_id is not None:
+            stmt = stmt.where(MessageModel.id > last_message_id)
+
+        result = await self.db.execute(stmt)
+        return list(result.scalars().all())
+
     async def get_messages(self, session_id: str) -> list[MessageModel]:
         # 先验证 session 归属
         result = await self.db.execute(

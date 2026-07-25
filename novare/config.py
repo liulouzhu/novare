@@ -81,6 +81,11 @@ class NovareConfig:
     episodic_memory_max_per_turn: int = 3         # 每轮最多保存条数
     episodic_memory_collection: str = "episodic_memories"  # Milvus collection 名
 
+    # 批量记忆提取调度
+    memory_extraction_interval_turns: int = 4      # 累计多少个完整轮次后提取一次（1-50）
+    memory_extraction_idle_seconds: int = 120      # 空闲多少秒后 flush（10-3600）
+    memory_extraction_flush_on_switch: bool = True  # 切换会话时是否 flush 旧会话
+
     # 测试 embedding fallback（生产环境禁止启用）
     test_embedding_fallback: bool = False
 
@@ -190,6 +195,17 @@ class NovareConfig:
         if ep_min_sim:
             cfg.episodic_memory_min_similarity = float(ep_min_sim)
 
+        # 批量记忆提取调度
+        mem_interval = os.environ.get("NOVARE_MEMORY_EXTRACTION_INTERVAL_TURNS")
+        if mem_interval:
+            cfg.memory_extraction_interval_turns = int(mem_interval)
+        mem_idle = os.environ.get("NOVARE_MEMORY_EXTRACTION_IDLE_SECONDS")
+        if mem_idle:
+            cfg.memory_extraction_idle_seconds = int(mem_idle)
+        mem_flush = os.environ.get("NOVARE_MEMORY_EXTRACTION_FLUSH_ON_SWITCH")
+        if mem_flush is not None:
+            cfg.memory_extraction_flush_on_switch = mem_flush.lower() in ("1", "true", "yes")
+
         # 测试 embedding fallback
         test_fallback = os.environ.get("NOVARE_TEST_EMBEDDING_FALLBACK")
         if test_fallback is not None:
@@ -201,6 +217,10 @@ class NovareConfig:
         cfg.episodic_memory_min_confidence = max(0.0, min(1.0, cfg.episodic_memory_min_confidence))
         cfg.episodic_memory_min_similarity = max(-1.0, min(1.0, cfg.episodic_memory_min_similarity))
         cfg.episodic_memory_max_per_turn = max(1, min(10, cfg.episodic_memory_max_per_turn))
+
+        # 批量记忆提取配置校验
+        cfg.memory_extraction_interval_turns = max(1, min(50, cfg.memory_extraction_interval_turns))
+        cfg.memory_extraction_idle_seconds = max(10, min(3600, cfg.memory_extraction_idle_seconds))
         # Collection 名只允许安全字符
         import re
         if not re.match(r'^[a-zA-Z0-9_]+$', cfg.episodic_memory_collection):

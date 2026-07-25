@@ -30,6 +30,7 @@ from web.backend.redis_service import redis_service  # noqa: E402
 from web.backend.episodic_memory.service import EpisodicMemoryService  # noqa: E402
 from web.backend.episodic_memory.vector_store import EpisodicMemoryVectorStore  # noqa: E402
 from web.backend.memory_extraction.coordinator import MemoryExtractionCoordinator  # noqa: E402
+from web.backend.memory_extraction.scheduler import MemoryExtractionScheduler  # noqa: E402
 
 logger = logging.getLogger("novare.web")
 
@@ -49,6 +50,7 @@ class AgentService:
         self.memory_service: MemoryServiceAsync | None = None
         self.episodic_memory_service: EpisodicMemoryService | None = None
         self.memory_coordinator: MemoryExtractionCoordinator | None = None
+        self.memory_scheduler: MemoryExtractionScheduler | None = None
         self.subagent_registry: SubagentRegistry | None = None
         self._mcp_clients: list[McpClient] = []
 
@@ -136,6 +138,21 @@ class AgentService:
         else:
             self.memory_coordinator = None
 
+        # 批量记忆提取调度器
+        if self.memory_coordinator and self.llm_client:
+            self.memory_scheduler = MemoryExtractionScheduler(
+                coordinator=self.memory_coordinator,
+                llm_client=self.llm_client,
+                redis_service=redis_service,
+                interval_turns=self.config.memory_extraction_interval_turns,
+                idle_seconds=self.config.memory_extraction_idle_seconds,
+                session_factory=get_session_factory,
+                flush_on_switch=self.config.memory_extraction_flush_on_switch,
+                extraction_task_timeout=self.config.turn_timeout,
+            )
+        else:
+            self.memory_scheduler = None
+
         self.agent = AgentLoop(
             llm_client=self.llm_client,
             tool_registry=self.tool_registry,
@@ -166,7 +183,11 @@ class AgentService:
 
     async def shutdown(self):
         """关闭时清理资源"""
-        # 1. 先等待或取消后台记忆任务
+        # 1. 先关闭批量记忆提取调度器（等待运行中任务）
+        if self.memory_scheduler:
+            await self.memory_scheduler.shutdown(timeout=5.0)
+
+        # 2. 先等待或取消后台记忆任务
         await self._shutdown_background_tasks(timeout=5.0)
 
         if self.subagent_registry:
@@ -517,21 +538,12 @@ class AgentService:
 
             await queue.put({"type": "done"})
 
-            # ── 统一记忆提取后台任务 ──
-            if user_id and self.memory_coordinator and self.llm_client:
-                new_messages = session.messages[msgs_before:]
+            # ── 批量记忆提取调度 ──
+            if user_id and self.memory_scheduler:
                 try:
-                    _bg_mem = asyncio.create_task(
-                        self.memory_coordinator.extract_and_persist(
-                            user_id=user_id,
-                            session_id=session.session_id,
-                            messages=new_messages,
-                            llm_client=self.llm_client,
-                        )
+                    await self.memory_scheduler.on_turn_completed(
+                        user_id, session.session_id
                     )
-                    _bg_mem.add_done_callback(_safe_task_callback)
-                    _background_tasks.add(_bg_mem)
-                    _bg_mem.add_done_callback(_background_tasks.discard)
                 except Exception:
                     logger.warning("Memory extraction scheduling failed (non-fatal)")
 

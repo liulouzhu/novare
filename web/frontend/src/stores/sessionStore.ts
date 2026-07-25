@@ -1,7 +1,14 @@
 /** 会话列表状态管理 */
 
 import { create } from 'zustand'
-import { type SessionMeta, fetchSessions, createSession as apiCreate, deleteSession as apiDelete, renameSession as apiRename } from '@/lib/api'
+import { type SessionMeta, fetchSessions, createSession as apiCreate, deleteSession as apiDelete, renameSession as apiRename, flushMemoryExtraction } from '@/lib/api'
+
+/** Best-effort flush 前一个会话的记忆提取。失败不阻止后续操作。 */
+function flushPreviousSession(oldId: string | null, newId: string | null) {
+  if (oldId && newId && oldId !== newId) {
+    flushMemoryExtraction(oldId).catch(() => {})
+  }
+}
 
 interface SessionStore {
   sessions: SessionMeta[]
@@ -32,12 +39,16 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   },
 
   createSession: async () => {
+    const oldId = get().currentId
     const session = await apiCreate()
+    flushPreviousSession(oldId, session.session_id)
     set((s) => ({ sessions: [session, ...s.sessions], currentId: session.session_id }))
     return session.session_id
   },
 
   switchSession: (id: string) => {
+    const oldId = get().currentId
+    flushPreviousSession(oldId, id)
     set({ currentId: id })
   },
 
@@ -80,5 +91,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const currentId = s.currentId === id ? (sessions[0]?.session_id ?? null) : s.currentId
       return { sessions, currentId }
     })
+    // 删除会话不 flush — session 和 messages 已删除，flush 必然 404
+    // 后端通过 forget_session 清理 scheduler 状态
   },
 }))
