@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import hashlib
 import logging
 from typing import Any
@@ -124,6 +125,16 @@ class AgentAdapter:
         user_id: str | None,
     ) -> None:
         """流式模式：逐 chunk 发送 _stream_delta。"""
+        raw_messages: list[dict] = []
+        compacted = False
+
+        def on_message(message: dict):
+            raw_messages.append(deepcopy(message))
+
+        def on_compact(_session):
+            nonlocal compacted
+            compacted = True
+
         def on_text(delta: str):
             self.bus.outbound.put_nowait(OutboundMessage(
                 channel=msg.channel,
@@ -150,6 +161,8 @@ class AgentAdapter:
             tool_context=ctx,
             system_prompt=self.agent_service.config.system_prompt,
             autosave=False,
+            on_compact=on_compact,
+            on_message=on_message,
         )
 
         self.bus.outbound.put_nowait(OutboundMessage(
@@ -159,7 +172,7 @@ class AgentAdapter:
             metadata={"_stream_delta": True, "_stream_end": True, "_streamed": True},
         ))
 
-        await self._persist_session(session, user_id)
+        await self._persist_session(session, user_id, raw_messages, compacted)
 
     async def _run_with_buffering(
         self,
@@ -169,6 +182,15 @@ class AgentAdapter:
     ) -> None:
         """非流式模式（微信等）：缓存全部输出后一次性发送。"""
         final_parts: list[str] = []
+        raw_messages: list[dict] = []
+        compacted = False
+
+        def on_message(message: dict):
+            raw_messages.append(deepcopy(message))
+
+        def on_compact(_session):
+            nonlocal compacted
+            compacted = True
 
         def on_text(delta: str):
             final_parts.append(delta)
@@ -185,6 +207,8 @@ class AgentAdapter:
             tool_context=ctx,
             system_prompt=self.agent_service.config.system_prompt,
             autosave=False,
+            on_compact=on_compact,
+            on_message=on_message,
         )
 
         final_text = "".join(final_parts).strip()
@@ -195,7 +219,7 @@ class AgentAdapter:
                 content=final_text,
             ))
 
-        await self._persist_session(session, user_id)
+        await self._persist_session(session, user_id, raw_messages, compacted)
 
     async def _resolve_user(self, sender_id: str, channel: str) -> str | None:
         """将渠道 sender_id 映射到 Novare user_id。"""
@@ -265,14 +289,25 @@ class AgentAdapter:
         logger.info("Auto-registered channel user: %s:%s -> %s (%s)", channel, sender_id, user.id, username)
         return str(user.id)
 
-    async def _persist_session(self, session: Any, user_id: str | None) -> None:
-        """持久化会话消息到 DB。"""
+    async def _persist_session(
+        self,
+        session: Any,
+        user_id: str | None,
+        raw_messages: list[dict],
+        compacted: bool,
+    ) -> None:
+        """Append raw messages and atomically update a snapshot after compaction."""
         if not user_id or not self.db_session_factory:
             return
         try:
             async with self.db_session_factory() as db:
                 try:
-                    from web.backend.repositories import SessionRepository, MessageRepository
+                    from novare.context_manager import estimate_messages_tokens
+                    from web.backend.repositories import (
+                        ContextSnapshotRepository,
+                        MessageRepository,
+                        SessionRepository,
+                    )
                     from uuid import UUID
 
                     user_uuid = UUID(user_id)
@@ -282,8 +317,38 @@ class AgentAdapter:
                         await session_repo.create(session.session_id, title="微信会话")
 
                     msg_repo = MessageRepository(db, user_uuid)
-                    if not await msg_repo.replace_session_messages(session.session_id, session.messages):
-                        logger.warning("replace_session_messages rejected: session %s not owned by user %s", session.session_id, user_id)
+                    last_raw_message_id = None
+                    for message in raw_messages:
+                        saved = await msg_repo.add_message(
+                            session_id=session.session_id,
+                            role=message["role"],
+                            content=message.get("content"),
+                            tool_calls=message.get("tool_calls"),
+                            tool_call_id=message.get("tool_call_id"),
+                            name=message.get("name"),
+                        )
+                        last_raw_message_id = saved.id
+
+                    if compacted:
+                        if last_raw_message_id is None:
+                            last_raw_message_id = await msg_repo.get_latest_message_id(
+                                session.session_id
+                            )
+                        if last_raw_message_id is None:
+                            raise RuntimeError(
+                                "Cannot persist context snapshot without raw messages"
+                            )
+                        snapshot_repo = ContextSnapshotRepository(db, user_uuid)
+                        snapshot = await snapshot_repo.upsert(
+                            session_id=session.session_id,
+                            snapshot_data=deepcopy(session.messages),
+                            compacted_through_message_id=last_raw_message_id,
+                            estimated_tokens=estimate_messages_tokens(session.messages),
+                        )
+                        if snapshot is None:
+                            raise PermissionError(
+                                f"Session {session.session_id} is not owned by user {user_id}"
+                            )
                     await db.commit()
                 except Exception:
                     await db.rollback()

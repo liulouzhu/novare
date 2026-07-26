@@ -5,3 +5,4 @@ from .message_repo import MessageRepository
 from .knowledge_repo import KnowledgeRepository
 from .memory_repo import MemoryRepository
 from .episodic_memory_repo import EpisodicMemoryRepository
+from .context_snapshot_repo import ContextSnapshotRepository

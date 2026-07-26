@@ -169,6 +169,27 @@ class MessageModel(Base):
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
+class ContextSnapshot(Base):
+    """Compacted working context while raw messages remain immutable."""
+    __tablename__ = "context_snapshots"
+
+    session_id = Column(
+        String(64),
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    snapshot_data = Column(JSON_TYPE, nullable=False)
+    compacted_through_message_id = Column(Integer, nullable=False)
+    schema_version = Column(Integer, nullable=False, default=1, server_default="1")
+    estimated_tokens = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    session = relationship("SessionModel")
+    user = relationship("User")
+
+
 class KnowledgeNode(Base):
     __tablename__ = "knowledge_nodes"
 

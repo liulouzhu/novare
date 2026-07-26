@@ -76,6 +76,7 @@ class AgentLoop:
         autosave: bool = True,
         on_compact: Callable[[object], Awaitable[None] | None] | None = None,
         should_cancel: Callable[[], Awaitable[bool] | bool] | None = None,
+        on_message: Callable[[dict], Awaitable[None] | None] | None = None,
     ) -> str:
         """执行一轮对话，带 per-turn 超时保护。
 
@@ -87,7 +88,7 @@ class AgentLoop:
         """
         try:
             return await asyncio.wait_for(
-                self._run_turn_core(session, user_input, on_text, on_tool, tool_context, on_task_state, system_prompt, autosave, on_compact, should_cancel),
+                self._run_turn_core(session, user_input, on_text, on_tool, tool_context, on_task_state, system_prompt, autosave, on_compact, should_cancel, on_message),
                 timeout=self.turn_timeout,
             )
         except asyncio.TimeoutError:
@@ -106,6 +107,7 @@ class AgentLoop:
         autosave: bool = True,
         on_compact: Callable[[object], Awaitable[None] | None] | None = None,
         should_cancel: Callable[[], Awaitable[bool] | bool] | None = None,
+        on_message: Callable[[dict], Awaitable[None] | None] | None = None,
     ) -> str:
         """执行一轮对话的核心逻辑：用户输入 → LLM（流式） → 工具循环 → 最终回答
 
@@ -132,6 +134,7 @@ class AgentLoop:
                 tool_context["reviewer_llm"] = self.reviewer_llm
 
             session.add_user_message(user_input)
+            await self._emit_message(on_message, session.messages[-1])
 
             for iteration in range(self.max_iterations):
                 # 协作式取消检查：每次迭代开始前
@@ -168,6 +171,7 @@ class AgentLoop:
                 # 如果没有工具调用，检查是否需要压缩后返回
                 if not response.tool_calls:
                     session.add_assistant_message(response.content)
+                    await self._emit_message(on_message, session.messages[-1])
                     await self._maybe_auto_compact(session, system_prompt=effective_prompt, autosave=autosave, on_compact=on_compact)
                     return response.content
 
@@ -177,6 +181,7 @@ class AgentLoop:
                     for tc in response.tool_calls
                 ]
                 session.add_assistant_message(response.content or "", tool_calls=tool_calls_dicts)
+                await self._emit_message(on_message, session.messages[-1])
 
                 # 执行每个工具调用
                 for tc in response.tool_calls:
@@ -204,6 +209,7 @@ class AgentLoop:
                         if on_tool:
                             on_tool("end", tc.name, tc.arguments, result, elapsed)
                     session.add_tool_result(tc.id, result)
+                    await self._emit_message(on_message, session.messages[-1])
                     logger.debug("Tool result: %s → %d chars", tc.name, len(result))
 
                     # 更新 task state
@@ -220,6 +226,17 @@ class AgentLoop:
         finally:
             # 清理局部状态，避免异常时残留
             task_mgr.clear()
+
+    @staticmethod
+    async def _emit_message(
+        callback: Callable[[dict], Awaitable[None] | None] | None,
+        message: dict,
+    ) -> None:
+        if callback is None:
+            return
+        result = callback(dict(message))
+        if asyncio.iscoroutine(result):
+            await result
 
     async def run_reviewer(
         self,

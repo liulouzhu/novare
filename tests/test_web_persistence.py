@@ -4,7 +4,7 @@
 - autosave=False 时 compact 不调用 session.save()
 - autosave=True 时保持旧行为
 - on_compact 回调在 compact 发生时被调用
-- MessageRepository.replace_session_messages 正确替换消息（异步）
+- on_message 回调独立收集未压缩的原始消息
 """
 
 import json
@@ -166,49 +166,37 @@ class TestOnCompactCallback:
         on_compact.assert_awaited_once()
 
 
-# ── replace_session_messages（异步版本） ─────────────────────────────────
+# ── 原始消息回调 ────────────────────────────────────────────────────────
 
-class TestReplaceSessionMessages:
+class TestRawMessageCallback:
     @pytest.mark.asyncio
-    async def test_replace_deletes_old_and_inserts_new(self):
-        """replace_session_messages 删除旧消息并按序插入新消息。"""
-        from web.backend.repositories.message_repo import MessageRepository
-        from web.backend.db.base import get_session_factory
+    async def test_collects_all_new_messages_when_compaction_replaces_session_list(self):
+        session = _make_session_with_messages(10)
+        _inject_usage(session, input_tokens=200_000)
+        tool_call = ToolCall(id="tc1", name="search", arguments={"q": "x"})
+        loop = _make_loop(
+            [
+                LLMResponse(content="checking", tool_calls=[tool_call], stop_reason="tool_calls", usage={}),
+                LLMResponse(content="done", tool_calls=[], stop_reason="stop", usage={}),
+            ],
+            auto_compact_threshold=100,
+            preserve_recent=2,
+        )
+        loop.tool_registry.execute = AsyncMock(return_value="tool result")
+        captured = []
 
-        async with get_session_factory()() as mock_db:
-            # Mock the execute and flush methods
-            mock_db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value="sess-1")))
-            mock_db.flush = AsyncMock()
-            mock_db.delete = AsyncMock()
+        await loop.run_turn(
+            session,
+            "new request",
+            autosave=False,
+            on_message=lambda message: captured.append(message),
+        )
 
-            repo = MessageRepository(mock_db, user_id="fake-uuid")
-
-            new_messages = [
-                {"role": "user", "content": "hello"},
-                {"role": "assistant", "content": "hi there"},
-                {"role": "tool", "tool_call_id": "tc1", "content": "result"},
-            ]
-
-            result = await repo.replace_session_messages("sess-1", new_messages)
-
-            assert result is True
-            assert mock_db.execute.call_count >= 1
-            assert mock_db.flush.call_count >= 1
-
-    @pytest.mark.asyncio
-    async def test_replace_empty_messages(self):
-        """replace_session_messages 处理空消息列表。"""
-        from web.backend.repositories.message_repo import MessageRepository
-        from web.backend.db.base import get_session_factory
-
-        async with get_session_factory()() as mock_db:
-            mock_db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value="sess-1")))
-            mock_db.flush = AsyncMock()
-            mock_db.delete = AsyncMock()
-
-            repo = MessageRepository(mock_db, user_id="fake-uuid")
-
-            result = await repo.replace_session_messages("sess-1", [])
-
-            assert result is True
-            assert mock_db.execute.call_count >= 1
+        assert [message["role"] for message in captured] == [
+            "user",
+            "assistant",
+            "tool",
+            "assistant",
+        ]
+        assert captured[0]["content"] == "new request"
+        assert captured[2]["tool_call_id"] == "tc1"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import logging
 import os
 import sys
@@ -16,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from novare.agent_loop import AgentLoop  # noqa: E402
 from novare.config import NovareConfig, get_user_workspace  # noqa: E402
+from novare.context_manager import estimate_messages_tokens  # noqa: E402
 from novare.llm_client import LLMClient  # noqa: E402
 from novare.mcp_client import McpClient  # noqa: E402
 from novare.session import Session  # noqa: E402
@@ -24,7 +26,11 @@ from novare.tool_result import parse_tool_result  # noqa: E402
 from novare.subagents.registry import SubagentRegistry  # noqa: E402
 from novare.subagents.tools import register_subagent_tools  # noqa: E402
 from web.backend.db.base import get_session_factory  # noqa: E402
-from web.backend.repositories import SessionRepository, MessageRepository  # noqa: E402
+from web.backend.repositories import (  # noqa: E402
+    ContextSnapshotRepository,
+    MessageRepository,
+    SessionRepository,
+)
 from web.backend.memory_service import MemoryServiceAsync  # noqa: E402
 from web.backend.redis_service import redis_service  # noqa: E402
 from web.backend.episodic_memory.service import EpisodicMemoryService  # noqa: E402
@@ -236,16 +242,23 @@ class AgentService:
                 user_uuid = UUID(user_id)
                 async with get_session_factory()() as db:
                     msg_repo = MessageRepository(db, user_uuid)
-                    messages = await msg_repo.get_messages(session_id)
-                    session.messages = [
-                        {
-                            "role": m.role,
-                            "content": m.content or "",
-                            **({"tool_calls": m.tool_calls} if m.tool_calls else {}),
-                            **({"tool_call_id": m.tool_call_id} if m.tool_call_id else {}),
-                        }
-                        for m in messages
-                    ]
+                    snapshot_repo = ContextSnapshotRepository(db, user_uuid)
+                    snapshot = await snapshot_repo.get_by_session(session_id)
+                    if snapshot and isinstance(snapshot.snapshot_data, list):
+                        messages = await msg_repo.get_messages_after(
+                            session_id,
+                            snapshot.compacted_through_message_id,
+                        )
+                        session.messages = deepcopy(snapshot.snapshot_data)
+                        session.messages.extend(_message_models_to_dicts(messages))
+                    else:
+                        if snapshot:
+                            logger.warning(
+                                "Invalid context snapshot for session %s; loading raw history",
+                                session_id,
+                            )
+                        messages = await msg_repo.get_messages(session_id)
+                        session.messages = _message_models_to_dicts(messages)
             except Exception:
                 logger.exception("Failed to load session from DB, returning empty session")
             return session
@@ -443,12 +456,15 @@ class AgentService:
                 except Exception:
                     logger.debug("Episodic memory retrieval failed (non-fatal)")
 
-            msgs_before = len(session.messages)
             compacted = False
+            raw_turn_messages: list[dict] = []
 
             def _on_compact(_session):
                 nonlocal compacted
                 compacted = True
+
+            def _on_message(message: dict):
+                raw_turn_messages.append(deepcopy(message))
 
             def on_task_state(state_dict: dict):
                 queue.put_nowait({"type": "task_state", **state_dict})
@@ -465,6 +481,7 @@ class AgentService:
                 autosave=False,
                 on_compact=_on_compact,
                 should_cancel=_check_cancel if cancel_key else None,
+                on_message=_on_message,
             )
 
             # ── 协作式取消检测 ──
@@ -491,31 +508,13 @@ class AgentService:
             # ── 持久化到 PostgreSQL（短生命周期异步 Session） ──
             if user_id:
                 try:
-                    user_uuid = UUID(user_id)
-                    async with get_session_factory()() as db:
-                        session_repo = SessionRepository(db, user_uuid)
-                        session_model = await session_repo.get_by_id(session.session_id)
-                        if not session_model:
-                            await session_repo.create(session.session_id, title=_extract_title_from_text(user_input))
-                        elif session_model.title in ("", "新会话", "New Chat"):
-                            await session_repo.update_title(session.session_id, _extract_title_from_text(user_input))
-
-                        msg_repo = MessageRepository(db, user_uuid)
-                        if compacted:
-                            if not await msg_repo.replace_session_messages(session.session_id, session.messages):
-                                logger.warning("replace_session_messages rejected: session %s not owned by user %s", session.session_id, user_id)
-                        else:
-                            new_messages = session.messages[msgs_before:]
-                            if new_messages:
-                                for msg in new_messages:
-                                    await msg_repo.add_message(
-                                        session_id=session.session_id,
-                                        role=msg["role"],
-                                        content=msg.get("content"),
-                                        tool_calls=msg.get("tool_calls"),
-                                        tool_call_id=msg.get("tool_call_id"),
-                                    )
-                        await db.commit()
+                    await self.persist_web_turn(
+                        session=session,
+                        user_id=user_id,
+                        raw_messages=raw_turn_messages,
+                        compacted=compacted,
+                        title=_extract_title_from_text(user_input),
+                    )
                 except Exception:
                     logger.exception("DB persistence error (non-fatal)")
 
@@ -582,6 +581,59 @@ class AgentService:
                 except Exception:
                     logger.warning("Failed to release Redis lock key=%s", lock_key)
 
+    async def persist_web_turn(
+        self,
+        session: Session,
+        user_id: str,
+        raw_messages: list[dict],
+        compacted: bool,
+        title: str,
+    ) -> None:
+        """Atomically append raw messages and update the compacted context snapshot."""
+        user_uuid = UUID(user_id)
+        async with get_session_factory()() as db:
+            session_repo = SessionRepository(db, user_uuid)
+            session_model = await session_repo.get_by_id(session.session_id)
+            if not session_model:
+                await session_repo.create(session.session_id, title=title)
+            elif session_model.title in ("", "新会话", "New Chat"):
+                await session_repo.update_title(session.session_id, title)
+
+            msg_repo = MessageRepository(db, user_uuid)
+            last_raw_message_id: int | None = None
+            for msg in raw_messages:
+                saved = await msg_repo.add_message(
+                    session_id=session.session_id,
+                    role=msg["role"],
+                    content=msg.get("content"),
+                    tool_calls=msg.get("tool_calls"),
+                    tool_call_id=msg.get("tool_call_id"),
+                    name=msg.get("name"),
+                )
+                last_raw_message_id = saved.id
+
+            if compacted:
+                if last_raw_message_id is None:
+                    last_raw_message_id = await msg_repo.get_latest_message_id(
+                        session.session_id
+                    )
+                if last_raw_message_id is None:
+                    raise RuntimeError("Cannot persist context snapshot without raw messages")
+
+                snapshot_repo = ContextSnapshotRepository(db, user_uuid)
+                snapshot = await snapshot_repo.upsert(
+                    session_id=session.session_id,
+                    snapshot_data=deepcopy(session.messages),
+                    compacted_through_message_id=last_raw_message_id,
+                    estimated_tokens=estimate_messages_tokens(session.messages),
+                )
+                if snapshot is None:
+                    raise PermissionError(
+                        f"Session {session.session_id} is not owned by user {user_id}"
+                    )
+
+            await db.commit()
+
 
 def _safe_task_callback(task: asyncio.Task):
     """安全的后台任务回调，避免 Task exception was never retrieved 警告。"""
@@ -612,6 +664,19 @@ def _extract_title(messages: list[dict]) -> str:
         if msg.get("role") == "user":
             return _extract_title_from_text(msg.get("content", ""))
     return "新会话"
+
+
+def _message_models_to_dicts(messages) -> list[dict]:
+    return [
+        {
+            "role": message.role,
+            "content": message.content or "",
+            **({"tool_calls": message.tool_calls} if message.tool_calls else {}),
+            **({"tool_call_id": message.tool_call_id} if message.tool_call_id else {}),
+            **({"name": message.name} if message.name else {}),
+        }
+        for message in messages
+    ]
 
 
 def _extract_title_from_text(content: str) -> str:

@@ -67,6 +67,17 @@ class MessageRepository(BaseRepository):
         )
         return list(result.scalars().all())
 
+    async def get_latest_message_id(self, session_id: str) -> int | None:
+        """Return the latest immutable raw-message id for an owned session."""
+        if not await self._verify_session_ownership(session_id):
+            return None
+        result = await self.db.execute(
+            select(func.max(MessageModel.id)).where(
+                MessageModel.session_id == session_id
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def _verify_session_ownership(self, session_id: str) -> bool:
         """校验 session 是否属于当前用户，供所有写操作内部使用。"""
         result = await self.db.execute(
@@ -84,29 +95,5 @@ class MessageRepository(BaseRepository):
         await self.db.execute(
             delete(MessageModel).where(MessageModel.session_id == session_id)
         )
-        await self.db.flush()
-        return True
-
-    async def replace_session_messages(self, session_id: str, messages: list[dict]) -> bool:
-        """删除该 session 的全部旧消息，按 messages 顺序重新插入。
-
-        返回 False 表示 session 不属于当前用户（拒绝操作）。
-        调用方负责 commit/rollback。用于 compact 后替换 DB 中的上下文消息。
-        """
-        if not await self._verify_session_ownership(session_id):
-            return False
-        await self.db.execute(
-            delete(MessageModel).where(MessageModel.session_id == session_id)
-        )
-        for msg in messages:
-            new_msg = MessageModel(
-                session_id=session_id,
-                role=msg["role"],
-                content=msg.get("content"),
-                tool_calls=msg.get("tool_calls"),
-                tool_call_id=msg.get("tool_call_id"),
-                name=msg.get("name"),
-            )
-            self.db.add(new_msg)
         await self.db.flush()
         return True

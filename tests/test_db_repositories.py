@@ -150,8 +150,8 @@ async def test_add_and_get_messages(db_session):
 
 
 @pytest.mark.asyncio
-async def test_replace_session_messages(db_session):
-    """MessageRepository.replace_session_messages 替换所有消息。"""
+async def test_messages_are_append_only_and_ids_remain_stable(db_session):
+    """Appending new messages never rewrites existing raw rows."""
     user_id = uuid.uuid4()
     user = User(id=user_id, username=f"test_{user_id.hex[:8]}", email=f"test_{user_id.hex[:8]}@test.com",
                 password_hash=hash_password("pass"))
@@ -162,18 +162,16 @@ async def test_replace_session_messages(db_session):
     await session_repo.create("s1", title="Test")
 
     msg_repo = MessageRepository(db_session, user_id)
-    await msg_repo.add_message("s1", role="user", content="Old message")
-
-    replaced = await msg_repo.replace_session_messages("s1", [
-        {"role": "user", "content": "New message 1"},
-        {"role": "assistant", "content": "New message 2"},
-    ])
-    assert replaced is True
+    old = await msg_repo.add_message("s1", role="user", content="Old message")
+    old_id = old.id
+    await msg_repo.add_message("s1", role="user", content="New message 1")
+    await msg_repo.add_message("s1", role="assistant", content="New message 2")
 
     messages = await msg_repo.get_messages("s1")
-    assert len(messages) == 2
-    assert messages[0].content == "New message 1"
-    assert messages[1].content == "New message 2"
+    assert len(messages) == 3
+    assert messages[0].id == old_id
+    assert messages[0].content == "Old message"
+    assert await msg_repo.get_latest_message_id("s1") == messages[-1].id
 
 
 @pytest.mark.asyncio
