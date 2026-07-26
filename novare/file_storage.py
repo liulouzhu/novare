@@ -34,6 +34,17 @@ def blob_path_for_hash(sha256: str) -> Path:
     return get_blob_root() / sha256[:2] / sha256
 
 
+def delete_stored_blob(storage_path: str) -> None:
+    """Delete a content-addressed blob while preventing path traversal."""
+    root = get_blob_root()
+    path = Path(storage_path).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"Refusing to delete file outside blob storage: {path}") from exc
+    path.unlink(missing_ok=True)
+
+
 async def store_upload_stream(upload: AsyncReadable) -> StoredBlob:
     """Stream an upload into content-addressed storage without loading it into memory."""
     temp_dir = get_blob_root() / ".tmp"

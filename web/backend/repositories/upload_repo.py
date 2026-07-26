@@ -69,6 +69,11 @@ class UploadRepository:
         )
         existing = before.scalar_one_or_none()
         if existing is not None:
+            if existing.deleted_at is not None:
+                existing.deleted_at = None
+                existing.original_filename = original_filename
+                await self.db.flush()
+                return existing, True
             return existing, False
 
         insert = _insert_for(self.db, UserUpload)
@@ -104,6 +109,7 @@ class UploadRepository:
             .where(
                 UserUpload.id == upload_id,
                 UserUpload.user_id == self.user_id,
+                UserUpload.deleted_at.is_(None),
             )
         )
         row = result.one_or_none()

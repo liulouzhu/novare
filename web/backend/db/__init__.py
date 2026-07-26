@@ -15,6 +15,7 @@ from .models import (
     KnowledgeNode,
     MessageModel,
     Paper,
+    PaperCleanupJob,
     PaperFile,
     PaperIdentifier,
     SessionModel,

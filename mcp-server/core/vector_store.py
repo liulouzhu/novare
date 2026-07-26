@@ -170,6 +170,28 @@ def insert_vectors(
     )
 
 
+def delete_vectors(paper_id: str, user_id: str | None = None) -> int:
+    """Delete vectors for one user-paper pair, or all users for a paper."""
+    _ensure_connected()
+    if not utility.has_collection(COLLECTION_NAME):
+        return 0
+
+    collection = Collection(COLLECTION_NAME)
+    expr_parts = [f"paper_id == {json.dumps(paper_id)}"]
+    if user_id is not None:
+        expr_parts.append(f"user_id == {json.dumps(user_id)}")
+    result = collection.delete(" and ".join(expr_parts))
+    collection.flush()
+    deleted = int(getattr(result, "delete_count", 0) or 0)
+    logger.info(
+        "Deleted %d vectors for paper=%s user=%s",
+        deleted,
+        paper_id,
+        user_id or "*",
+    )
+    return deleted
+
+
 def search_vectors(
     user_id: str,
     query_embedding: list[float],

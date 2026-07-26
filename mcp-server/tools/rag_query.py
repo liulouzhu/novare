@@ -124,6 +124,7 @@ async def _get_user_paper_ids(user_id: str) -> set[str]:
             select(UserPaper.paper_id).where(
                 UserPaper.user_id == UUID(user_id),
                 UserPaper.has_fulltext_access.is_(True),
+                UserPaper.deleted_at.is_(None),
             )
         )
         return {str(up[0]) for up in result.all()}
@@ -442,7 +443,9 @@ async def handle_rag_query(args: dict, user_id: str = None, allow_unscoped: bool
             from web.backend.db.models import Paper
             from sqlalchemy import select
             async with get_connection() as conn:
-                result = await conn.execute(select(Paper.id))
+                result = await conn.execute(
+                    select(Paper.id).where(Paper.deleted_at.is_(None))
+                )
                 es_paper_ids = [r[0] for r in result.all()]
         except Exception as e:
             logger.warning("Failed to fetch all paper_ids for ES: %s", e)

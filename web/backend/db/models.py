@@ -81,6 +81,7 @@ class Paper(Base):
     citation_count = Column(Integer, default=0)
     visibility = Column(String(10), nullable=False, default="public", server_default="public")
     created_by_user_id = Column(GUID(), ForeignKey("users.id"), nullable=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
@@ -129,6 +130,7 @@ class UserUpload(Base):
     user_id = Column(GUID(), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     blob_id = Column(GUID(), ForeignKey("file_blobs.id"), nullable=False, index=True)
     original_filename = Column(String(512), nullable=False)
+    deleted_at = Column(DateTime(timezone=True), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     user = relationship("User")
@@ -173,6 +175,7 @@ class UserPaper(Base):
     relation_type = Column(String(20), nullable=False, default="searched", server_default="searched")
     has_fulltext_access = Column(Boolean, nullable=False, default=False, server_default="false")
     source = Column(String(30))  # paper_search | paper_parse | upload | share
+    deleted_at = Column(DateTime(timezone=True), nullable=True, index=True)
     parsed_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     user = relationship("User")
     paper = relationship("Paper")
@@ -207,6 +210,34 @@ class Embedding(Base):
     chunk_id = Column(Integer, ForeignKey("chunks.id", ondelete="CASCADE"), primary_key=True)
     dim = Column(Integer, nullable=False)
     vec = Column(LargeBinary, nullable=False)  # numpy.float32 tobytes()
+
+
+class PaperCleanupJob(Base):
+    """Durable outbox job for idempotent cross-store paper cleanup."""
+    __tablename__ = "paper_cleanup_jobs"
+    __table_args__ = (
+        CheckConstraint("scope IN ('user', 'paper')", name="ck_paper_cleanup_scope"),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'failed', 'completed')",
+            name="ck_paper_cleanup_status",
+        ),
+        Index("idx_paper_cleanup_ready", "status", "next_retry_at"),
+        Index("idx_paper_cleanup_paper", "paper_id"),
+    )
+
+    id = Column(GUID(), primary_key=True, default=gen_uuid)
+    paper_id = Column(String(255), nullable=False)
+    user_id = Column(GUID(), nullable=False)
+    scope = Column(String(10), nullable=False)
+    status = Column(String(20), nullable=False, default="pending", server_default="pending")
+    steps = Column(JSON_TYPE, nullable=False, default=dict)
+    payload = Column(JSON_TYPE, nullable=False, default=dict)
+    attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    last_error = Column(Text)
+    next_retry_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class SessionModel(Base):

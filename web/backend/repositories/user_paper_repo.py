@@ -3,7 +3,7 @@ from uuid import UUID
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from web.backend.db.models import UserPaper
+from web.backend.db.models import Paper, UserPaper, utcnow
 from .base import BaseRepository
 
 
@@ -18,6 +18,13 @@ class UserPaperRepository(BaseRepository):
         has_fulltext_access: bool = False,
         source: str | None = None,
     ) -> UserPaper:
+        # Serialize association creation against a last-reference cleanup worker.
+        paper_result = await self.db.execute(
+            select(Paper).where(Paper.id == paper_id).with_for_update()
+        )
+        paper = paper_result.scalar_one_or_none()
+        if paper is None or paper.deleted_at is not None:
+            raise ValueError(f"Paper {paper_id} is unavailable or being cleaned up")
         result = await self.db.execute(
             select(UserPaper).where(
                 UserPaper.user_id == self.user_id,
@@ -26,6 +33,7 @@ class UserPaperRepository(BaseRepository):
         )
         existing = result.scalar_one_or_none()
         if existing:
+            existing.deleted_at = None
             if existing.relation_type == "searched" and relation_type != "searched":
                 existing.relation_type = relation_type
             if has_fulltext_access and not existing.has_fulltext_access:
@@ -47,7 +55,10 @@ class UserPaperRepository(BaseRepository):
     async def get_user_papers(self) -> list[str]:
         """返回用户关联的所有 paper_id（不限 relation_type）。"""
         result = await self.db.execute(
-            select(UserPaper.paper_id).where(UserPaper.user_id == self.user_id)
+            select(UserPaper.paper_id).where(
+                UserPaper.user_id == self.user_id,
+                UserPaper.deleted_at.is_(None),
+            )
         )
         return [r[0] for r in result.all()]
 
@@ -57,6 +68,7 @@ class UserPaperRepository(BaseRepository):
             select(UserPaper.paper_id).where(
                 UserPaper.user_id == self.user_id,
                 UserPaper.has_fulltext_access.is_(True),
+                UserPaper.deleted_at.is_(None),
             )
         )
         return {r[0] for r in result.all()}
@@ -67,6 +79,7 @@ class UserPaperRepository(BaseRepository):
             select(UserPaper).where(
                 UserPaper.user_id == self.user_id,
                 UserPaper.paper_id == paper_id,
+                UserPaper.deleted_at.is_(None),
             )
         )
         return result.scalar_one_or_none() is not None
@@ -77,27 +90,34 @@ class UserPaperRepository(BaseRepository):
             select(UserPaper).where(
                 UserPaper.user_id == self.user_id,
                 UserPaper.paper_id == paper_id,
+                UserPaper.deleted_at.is_(None),
             )
         )
         row = result.scalar_one_or_none()
         return row is not None and row.has_fulltext_access
 
     async def dissociate(self, paper_id: str) -> bool:
-        """移除当前用户与论文的关联，返回是否确实删除了记录。"""
-        from sqlalchemy import delete
+        """Logically remove the user's paper association."""
         result = await self.db.execute(
-            delete(UserPaper).where(
+            select(UserPaper).where(
                 UserPaper.user_id == self.user_id,
                 UserPaper.paper_id == paper_id,
+                UserPaper.deleted_at.is_(None),
             )
         )
-        return result.rowcount > 0
+        row = result.scalar_one_or_none()
+        if row is None:
+            return False
+        row.deleted_at = utcnow()
+        await self.db.flush()
+        return True
 
     async def count_associations(self, paper_id: str) -> int:
         """统计有多少用户关联了该论文。"""
         result = await self.db.execute(
             select(func.count()).select_from(UserPaper).where(
                 UserPaper.paper_id == paper_id,
+                UserPaper.deleted_at.is_(None),
             )
         )
         return result.scalar_one()

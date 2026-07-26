@@ -298,6 +298,30 @@ async def bulk_upsert_chunks(documents: list[dict]) -> dict:
         return {"success": 0, "errors": [str(e)[:200]]}
 
 
+async def delete_paper_chunks(paper_id: str) -> int:
+    """Delete all BM25 documents for a paper; safe to retry."""
+    if _AsyncElasticsearch is None:
+        return 0
+    client = await _get_client()
+    if client is None:
+        raise RuntimeError("Elasticsearch client not available")
+    if not await client.indices.exists(index=ES_INDEX):
+        return 0
+
+    response = await client.delete_by_query(
+        index=ES_INDEX,
+        body={"query": {"term": {"paper_id": paper_id}}},
+        conflicts="proceed",
+        refresh=True,
+    )
+    failures = response.get("failures") or []
+    if failures:
+        raise RuntimeError(f"Elasticsearch delete failures: {failures[:3]}")
+    deleted = int(response.get("deleted", 0) or 0)
+    logger.info("Deleted %d Elasticsearch chunks for paper=%s", deleted, paper_id)
+    return deleted
+
+
 # ── BM25 搜索 ─────────────────────────────────────────────────────────────
 
 async def search_chunks(

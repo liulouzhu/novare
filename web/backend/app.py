@@ -46,6 +46,20 @@ async def _idle_cleanup_loop():
             web_logger.warning("Sandbox idle cleanup error", exc_info=True)
 
 
+async def _paper_cleanup_loop():
+    """Retry durable paper cleanup outbox jobs."""
+    from web.backend.paper_cleanup import process_pending_cleanup_jobs
+
+    while True:
+        try:
+            attempted = await process_pending_cleanup_jobs()
+            if attempted:
+                web_logger.info("Processed %d paper cleanup job(s)", attempted)
+        except Exception:
+            web_logger.warning("Paper cleanup loop error", exc_info=True)
+        await asyncio.sleep(30)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用启动/关闭生命周期"""
@@ -86,6 +100,9 @@ async def lifespan(app: FastAPI):
         except Exception:
             web_logger.warning("Redis init failed (non-fatal), continuing without Redis", exc_info=True)
 
+    paper_cleanup_task = asyncio.create_task(_paper_cleanup_loop())
+    web_logger.info("Paper cleanup retry task started")
+
     # ── 多渠道接入系统 ──
     channel_tasks: list[asyncio.Task] = []
     if agent_service.config and agent_service.config.channels_enabled:
@@ -109,6 +126,11 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        paper_cleanup_task.cancel()
+        try:
+            await paper_cleanup_task
+        except asyncio.CancelledError:
+            pass
         cleanup_task.cancel()
         try:
             await cleanup_task

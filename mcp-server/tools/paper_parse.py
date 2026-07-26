@@ -114,6 +114,7 @@ async def _user_has_fulltext_access(user_id: str, paper_id: str) -> bool:
                     UserPaper.user_id == UUID(user_id),
                     UserPaper.paper_id == paper_id,
                     UserPaper.has_fulltext_access.is_(True),
+                    UserPaper.deleted_at.is_(None),
                 )
             )
             return result.scalar_one_or_none() is not None
@@ -170,32 +171,16 @@ async def associate_user_paper(
         return
     try:
         from web.backend.db.base import get_session_factory
-        from web.backend.db.models import UserPaper
+        from web.backend.repositories.user_paper_repo import UserPaperRepository
         from uuid import UUID
-        from sqlalchemy import select
         async with get_session_factory()() as db:
-            result = await db.execute(
-                select(UserPaper).where(
-                    UserPaper.user_id == UUID(user_id),
-                    UserPaper.paper_id == paper_id,
-                )
+            repo = UserPaperRepository(db, UUID(user_id))
+            await repo.associate(
+                paper_id,
+                relation_type=relation_type,
+                has_fulltext_access=has_fulltext_access,
+                source=source,
             )
-            existing = result.scalar_one_or_none()
-            if existing:
-                if existing.relation_type == "searched" and relation_type != "searched":
-                    existing.relation_type = relation_type
-                if has_fulltext_access and not existing.has_fulltext_access:
-                    existing.has_fulltext_access = True
-                if source:
-                    existing.source = source
-            else:
-                db.add(UserPaper(
-                    user_id=UUID(user_id),
-                    paper_id=paper_id,
-                    relation_type=relation_type,
-                    has_fulltext_access=has_fulltext_access,
-                    source=source,
-                ))
             await db.commit()
     except Exception as e:
         logger.warning("Failed to associate user-paper: %s", e)
@@ -607,7 +592,12 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
                 await add_paper_identifiers(conn, resolved_paper_id, identity_candidates)
                 from web.backend.db.models import Paper
                 from sqlalchemy import select
-                result = await conn.execute(select(Paper).where(Paper.id == resolved_paper_id))
+                result = await conn.execute(
+                    select(Paper).where(
+                        Paper.id == resolved_paper_id,
+                        Paper.deleted_at.is_(None),
+                    )
+                )
                 existing_row = result.scalar_one_or_none()
                 if existing_row:
                     if existing_row.visibility == "private" and existing_row.created_by_user_id and not owns_upload:

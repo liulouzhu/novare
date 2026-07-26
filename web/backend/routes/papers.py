@@ -10,15 +10,16 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select, delete
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from web.backend.db.base import get_db
-from web.backend.db.models import User, Chunk, Embedding, Citation, UserPaper
+from web.backend.db.models import User, Chunk
 from web.backend.auth.dependencies import get_current_user
 from web.backend.auth.service import decode_access_token
 from web.backend.repositories import PaperRepository, UserPaperRepository
 from web.backend.models import PaperFullTextOut, PaperOut
+from web.backend.paper_cleanup import process_cleanup_job, schedule_paper_cleanup
 
 logger = logging.getLogger("novare.web.papers")
 router = APIRouter(prefix="/api/papers", tags=["papers"])
@@ -292,36 +293,23 @@ async def delete_paper(
 ):
     """从当前用户的论文库中移除论文。"""
     paper_repo = PaperRepository(db)
-    user_paper_repo = UserPaperRepository(db, user.id)
 
     paper = await paper_repo.get_visible(paper_id, user.id)
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
 
-    dissociated = await user_paper_repo.dissociate(paper_id)
-    if not dissociated:
+    job = await schedule_paper_cleanup(
+        db,
+        paper_id=paper_id,
+        user_id=user.id,
+    )
+    if job is None:
         raise HTTPException(status_code=404, detail="Paper not associated with user")
-
-    if paper.created_by_user_id == user.id:
-        remaining = await user_paper_repo.count_associations(paper_id)
-        if remaining == 0:
-            # 删除 embeddings（通过 chunks 关联）
-            result = await db.execute(select(Chunk.id).where(Chunk.paper_id == paper_id))
-            chunk_ids = [r[0] for r in result.all()]
-            if chunk_ids:
-                await db.execute(
-                    delete(Embedding).where(Embedding.chunk_id.in_(chunk_ids))
-                )
-            # 删除 chunks
-            await db.execute(delete(Chunk).where(Chunk.paper_id == paper_id))
-            # 删除 citations
-            await db.execute(
-                delete(Citation).where(
-                    (Citation.source_id == paper_id) | (Citation.target_id == paper_id)
-                )
-            )
-            # 删除论文
-            await db.delete(paper)
-
     await db.commit()
-    return {"ok": True}
+    completed = await process_cleanup_job(db, job.id)
+    return {
+        "ok": True,
+        "cleanup_job_id": str(job.id),
+        "cleanup_scope": job.scope,
+        "cleanup_status": completed.status if completed else "pending",
+    }

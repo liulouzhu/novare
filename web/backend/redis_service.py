@@ -61,6 +61,10 @@ class RedisService:
         """Redis 是否已启用且连接正常。"""
         return self._enabled and self._available
 
+    @property
+    def is_enabled(self) -> bool:
+        return self._enabled
+
     # ── 基础操作 ──────────────────────────────────────────────────────────────
 
     async def set_nx(self, key: str, value: str, ttl: int) -> bool | None:
@@ -118,6 +122,27 @@ class RedisService:
         except Exception:
             logger.warning("Redis delete failed for key=%s", key, exc_info=True)
             self._available = False
+
+    async def delete_prefix(self, prefix: str) -> bool:
+        """Delete keys under a cache prefix without using blocking KEYS."""
+        if not self._enabled:
+            return True
+        if not self.is_available or self._client is None:
+            return False
+        try:
+            batch: list[str] = []
+            async for key in self._client.scan_iter(match=f"{prefix}*", count=200):
+                batch.append(key)
+                if len(batch) >= 200:
+                    await self._client.delete(*batch)
+                    batch.clear()
+            if batch:
+                await self._client.delete(*batch)
+            return True
+        except Exception:
+            logger.warning("Redis delete_prefix failed for prefix=%s", prefix, exc_info=True)
+            self._available = False
+            return False
 
     async def delete_if_value(self, key: str, expected_value: str) -> bool:
         """原子 compare-and-delete（Lua 脚本）。

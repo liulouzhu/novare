@@ -13,13 +13,13 @@ class PaperRepository(SharedRepository):
 
     async def get_by_id(self, paper_id: str) -> Paper | None:
         result = await self.db.execute(
-            select(Paper).where(Paper.id == paper_id)
+            select(Paper).where(Paper.id == paper_id, Paper.deleted_at.is_(None))
         )
         return result.scalar_one_or_none()
 
     async def get_visible(self, paper_id: str, user_id: UUID | None = None) -> Paper | None:
         """Return public, owned, or explicitly associated papers."""
-        stmt = select(Paper).where(Paper.id == paper_id)
+        stmt = select(Paper).where(Paper.id == paper_id, Paper.deleted_at.is_(None))
         if user_id:
             stmt = stmt.where(or_(
                 Paper.visibility == "public",
@@ -27,6 +27,7 @@ class PaperRepository(SharedRepository):
                 exists().where(
                     UserPaper.paper_id == Paper.id,
                     UserPaper.user_id == user_id,
+                    UserPaper.deleted_at.is_(None),
                 ),
             ))
         else:
@@ -36,7 +37,7 @@ class PaperRepository(SharedRepository):
 
     async def get_all(self, q: str | None = None, user_id: UUID | None = None) -> list[Paper]:
         """List public, owned, or explicitly associated papers."""
-        stmt = select(Paper)
+        stmt = select(Paper).where(Paper.deleted_at.is_(None))
         if user_id:
             stmt = stmt.where(or_(
                 Paper.visibility == "public",
@@ -44,6 +45,7 @@ class PaperRepository(SharedRepository):
                 exists().where(
                     UserPaper.paper_id == Paper.id,
                     UserPaper.user_id == user_id,
+                    UserPaper.deleted_at.is_(None),
                 ),
             ))
         else:
@@ -55,8 +57,13 @@ class PaperRepository(SharedRepository):
         return list(result.scalars().all())
 
     async def upsert(self, paper_data: dict) -> Paper:
-        existing = await self.get_by_id(paper_data["id"])
+        result = await self.db.execute(
+            select(Paper).where(Paper.id == paper_data["id"])
+        )
+        existing = result.scalar_one_or_none()
         if existing:
+            if existing.deleted_at is not None:
+                raise ValueError(f"Paper {existing.id} is being cleaned up")
             for key, value in paper_data.items():
                 if key != "id":
                     setattr(existing, key, value)

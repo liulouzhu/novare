@@ -51,14 +51,18 @@ async def resolve_paper_id(conn, identifiers: list[str]) -> str | None:
 
     result = await conn.execute(
         select(PaperIdentifier.identifier, PaperIdentifier.paper_id)
+        .join(Paper, Paper.id == PaperIdentifier.paper_id)
         .where(PaperIdentifier.identifier.in_(canonical))
+        .where(Paper.deleted_at.is_(None))
     )
     aliases = {identifier: paper_id for identifier, paper_id in result.all()}
     for identifier in canonical:
         if identifier in aliases:
             return aliases[identifier]
 
-    result = await conn.execute(select(Paper.id).where(Paper.id.in_(canonical)))
+    result = await conn.execute(
+        select(Paper.id).where(Paper.id.in_(canonical), Paper.deleted_at.is_(None))
+    )
     existing = set(result.scalars().all())
     return next((identifier for identifier in canonical if identifier in existing), None)
 
@@ -124,6 +128,8 @@ async def upsert_paper(conn, paper: dict) -> str:
     existing = result.scalar_one_or_none()
 
     if existing:
+        if existing.deleted_at is not None:
+            raise RuntimeError(f"Paper {existing.id} is being cleaned up")
         existing.title = paper["title"]
         existing.authors = authors
         if paper.get("abstract"):
@@ -172,7 +178,9 @@ async def get_paper(conn, paper_id: str) -> Optional[dict]:
     from web.backend.db.models import Paper
     from sqlalchemy import select
 
-    result = await conn.execute(select(Paper).where(Paper.id == paper_id))
+    result = await conn.execute(
+        select(Paper).where(Paper.id == paper_id, Paper.deleted_at.is_(None))
+    )
     row = result.scalar_one_or_none()
     if not row:
         return None
@@ -197,7 +205,9 @@ async def get_all_papers(conn) -> list[dict]:
     from web.backend.db.models import Paper
     from sqlalchemy import select
 
-    result = await conn.execute(select(Paper).order_by(Paper.created_at.desc()))
+    result = await conn.execute(
+        select(Paper).where(Paper.deleted_at.is_(None)).order_by(Paper.created_at.desc())
+    )
     rows = result.scalars().all()
     return [{
         "id": r.id, "title": r.title, "authors": r.authors,
@@ -277,6 +287,7 @@ async def get_all_embeddings(conn) -> list[dict]:
         select(Embedding, Chunk, Paper)
         .join(Chunk, Embedding.chunk_id == Chunk.id)
         .join(Paper, Chunk.paper_id == Paper.id)
+        .where(Paper.deleted_at.is_(None))
     )
     rows = result.all()
     results = []
@@ -307,7 +318,7 @@ async def get_embeddings_by_paper_ids(conn, paper_ids: set[str] | list[str]) -> 
         select(Embedding, Chunk, Paper)
         .join(Chunk, Embedding.chunk_id == Chunk.id)
         .join(Paper, Chunk.paper_id == Paper.id)
-        .where(Chunk.paper_id.in_(paper_id_list))
+        .where(Chunk.paper_id.in_(paper_id_list), Paper.deleted_at.is_(None))
     )
     rows = result.all()
     results = []
