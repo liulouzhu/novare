@@ -101,6 +101,13 @@ async def _search_semantic_scholar(
 
                     results.append({
                         "id": source_id,
+                        "identifiers": [
+                            identifier for identifier in (
+                                f"doi:{ext_ids['DOI']}" if ext_ids.get("DOI") else None,
+                                f"arxiv:{ext_ids['ArXiv']}" if ext_ids.get("ArXiv") else None,
+                                f"s2:{paper.get('paperId', '')}" if paper.get("paperId") else None,
+                            ) if identifier
+                        ],
                         "title": paper.get("title", ""),
                         "authors": authors,
                         "abstract": paper.get("abstract", ""),
@@ -194,6 +201,7 @@ async def _search_arxiv(
 
                     results.append({
                         "id": f"arxiv:{arxiv_base}",
+                        "identifiers": [f"arxiv:{arxiv_base}"],
                         "title": title,
                         "authors": authors,
                         "abstract": summary[:500],
@@ -328,6 +336,10 @@ async def handle_paper_search(args: dict, user_id: str = None) -> str:
                 for paper in merged:
                     paper["visibility"] = "public"
                     await upsert_paper(conn, paper)
+                deduplicated = {}
+                for paper in merged:
+                    deduplicated.setdefault(paper["id"], paper)
+                merged = list(deduplicated.values())
                 # 搜索到的论文自动关联到当前用户
                 if user_id:
                     from tools.paper_parse import associate_user_paper

@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import logging
 import re
-import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from novare.config import get_user_workspace
+from novare.file_storage import store_upload_stream
 from web.backend.auth.dependencies import get_current_user
+from web.backend.db.base import get_db
 from web.backend.db.models import User
 from web.backend.models import UploadResponse
+from web.backend.repositories.upload_repo import UploadRepository
 
 logger = logging.getLogger("novare.web.upload")
 router = APIRouter(prefix="/api/upload", tags=["upload"])
@@ -29,32 +31,45 @@ def _safe_filename(name: str) -> str:
 async def upload_file(
     file: UploadFile = File(...),
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """上传文件（PDF / 数据文件）
-
-    文件保存到 workspace/<user_id>/uploads/ 目录，返回本地路径供 paper_parse 使用。
-    """
+    """Store one global blob and create a user-scoped upload authorization."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename")
 
-    # 使用统一的用户隔离 workspace
-    upload_dir = Path(get_user_workspace(str(user.id))) / "uploads"
-    upload_dir.mkdir(parents=True, exist_ok=True)
-
-    # 用 UUID 前缀防冲突 + 安全文件名防穿越
     safe_name = _safe_filename(file.filename)
-    dest = upload_dir / f"{uuid.uuid4().hex}_{safe_name}"
-
     try:
-        content = await file.read()
-        dest.write_bytes(content)
+        stored = await store_upload_stream(file)
+        if stored.size_bytes == 0:
+            raise HTTPException(status_code=400, detail="Empty file")
+
+        repository = UploadRepository(db, user.id)
+        blob = await repository.get_or_create_blob(
+            sha256=stored.sha256,
+            size_bytes=stored.size_bytes,
+            mime_type=file.content_type,
+            storage_path=stored.storage_path,
+        )
+        upload, created = await repository.get_or_create_upload(
+            blob=blob,
+            original_filename=safe_name,
+        )
+        await db.commit()
+    except HTTPException:
+        raise
     except Exception as e:
+        await db.rollback()
+        logger.exception("Failed to persist upload for user %s", user.id)
         raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
 
-    logger.info("File uploaded by user %s: %s (%d bytes)", user.id, safe_name, len(content))
+    logger.info(
+        "File uploaded by user %s: %s (%d bytes, upload=%s, reused=%s)",
+        user.id, safe_name, stored.size_bytes, upload.id, not created,
+    )
 
     return UploadResponse(
+        upload_id=str(upload.id),
         filename=safe_name,
-        file_path=str(dest.resolve()),
+        already_uploaded=not created,
         message=f"文件已上传: {safe_name}",
     )

@@ -2,9 +2,9 @@
 
 import logging
 import os
-import tempfile
 from pathlib import Path
 from typing import Optional
+from uuid import UUID
 
 import httpx
 
@@ -15,10 +15,16 @@ from core.database import (
     insert_chunks,
     insert_embeddings_batch,
     insert_citation,
+    add_paper_identifiers,
+    resolve_paper_id,
     upsert_paper,
 )
 from core.embedding import embed_batch_async, get_embedding_dim, EmbeddingProviderError
-from core.paper_id import canonicalize_paper_id
+from core.paper_id import (
+    canonicalize_identifiers,
+    canonicalize_paper_id,
+    extract_document_identifiers,
+)
 from core.pdf_parser import (
     split_into_sections,
     chunk_text,
@@ -26,6 +32,7 @@ from core.pdf_parser import (
     extract_paper_ids_from_refs,
 )
 from core.mineru import parse_pdf_with_mineru
+from novare.file_storage import store_existing_file
 from tools.result import ok, fail, truncate, MAX_SECTION_PREVIEW, MAX_SECTIONS, MAX_REFS, MAX_REF_LEN
 
 logger = logging.getLogger("research-server.paper_parse")
@@ -209,6 +216,42 @@ async def _download_pdf(url: str, dest_path: str) -> bool:
         return False
 
 
+async def _get_owned_upload(upload_id: str, user_id: str | None):
+    if not user_id:
+        raise PermissionError("缺少用户上下文，无法访问上传文件。")
+    try:
+        parsed_upload_id = UUID(upload_id)
+        parsed_user_id = UUID(user_id)
+    except (TypeError, ValueError):
+        raise PermissionError("无效的 upload_id。")
+
+    from web.backend.db.base import get_session_factory
+    from web.backend.repositories.upload_repo import UploadRepository
+
+    async with get_session_factory()() as db:
+        owned = await UploadRepository(db, parsed_user_id).get_owned(parsed_upload_id)
+    if owned is None:
+        raise PermissionError("上传文件不存在或不属于当前用户。")
+    if not Path(owned.storage_path).is_file():
+        raise FileNotFoundError("上传文件内容不存在。")
+    return owned
+
+
+async def _register_blob(path: str, mime_type: str | None, *, move: bool = False):
+    stored = store_existing_file(path, move=move)
+    from web.backend.repositories.upload_repo import get_or_create_file_blob
+    async with get_connection() as conn:
+        blob = await get_or_create_file_blob(
+            conn,
+            sha256=stored.sha256,
+            size_bytes=stored.size_bytes,
+            mime_type=mime_type,
+            storage_path=stored.storage_path,
+        )
+        blob_id = blob.id
+    return blob_id, stored
+
+
 def _milvus_insert(
     paper_id: str,
     chunk_ids: list[int],
@@ -226,18 +269,39 @@ def _milvus_insert(
         logger.warning("Failed to insert vectors into Milvus (non-fatal): %s", e)
 
 
+async def _ensure_user_milvus_vectors(user_id: str | None, paper_id: str) -> None:
+    """Reuse PostgreSQL embeddings when a new user gains access to parsed chunks."""
+    if not user_id or await _user_has_fulltext_access(user_id, paper_id):
+        return
+    from core.database import get_embeddings_by_paper_ids
+    async with get_connection() as conn:
+        rows = await get_embeddings_by_paper_ids(conn, {paper_id})
+    if not rows:
+        return
+    chunks = [{"text": row["text"], "section": row["section"]} for row in rows]
+    embeddings = [row["vec"].tolist() for row in rows]
+    _milvus_insert(
+        paper_id,
+        [row["chunk_id"] for row in rows],
+        chunks,
+        embeddings,
+        user_id=user_id,
+    )
+
+
 async def handle_paper_parse(args: dict, user_id: str = None) -> str:
     """解析论文 PDF"""
     paper_id = args.get("paper_id")
     pdf_url = args.get("pdf_url")
     file_path = args.get("file_path")
+    upload_id = args.get("upload_id")
 
     # 规范化 paper_id（arXiv ID 统一格式）
     if paper_id:
         paper_id = canonicalize_paper_id(paper_id)
 
-    if not paper_id and not pdf_url and not file_path:
-        return fail("paper_parse", "请提供 paper_id、pdf_url 或 file_path。")
+    if not paper_id and not pdf_url and not file_path and not upload_id:
+        return fail("paper_parse", "请提供 paper_id、pdf_url、upload_id 或 file_path。")
 
     # 公共下载目录（所有用户共享）
     public_dir = _public_papers_dir()
@@ -247,9 +311,45 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
     pdf_path = None
     resolved_paper_id = paper_id
     is_local_file = False
+    owns_upload = False
+    blob_id = None
+    blob_sha256 = None
+    paper_file_source = "download"
+    paper_file_access_scope = "public"
+    identity_candidates = [paper_id] if paper_id else []
+    blob_linked = False
+
+    if paper_id:
+        async with get_connection() as conn:
+            resolved_paper_id = await resolve_paper_id(conn, [paper_id]) or paper_id
+
+    # Web uploads are authorized by opaque upload_id, never by a client-provided path.
+    if upload_id:
+        try:
+            owned_upload = await _get_owned_upload(upload_id, user_id)
+        except (PermissionError, FileNotFoundError) as e:
+            return fail("paper_parse", str(e))
+        pdf_path = owned_upload.storage_path
+        blob_id = owned_upload.blob_id
+        blob_sha256 = owned_upload.sha256
+        is_local_file = True
+        owns_upload = True
+        paper_file_source = "upload"
+        paper_file_access_scope = "private"
+
+        from web.backend.repositories.upload_repo import get_paper_files_for_blob
+        async with get_connection() as conn:
+            linked_files = await get_paper_files_for_blob(conn, blob_id)
+        if linked_files:
+            explicit_match = next(
+                (item for item in linked_files if item.paper_id == resolved_paper_id),
+                None,
+            )
+            resolved_paper_id = (explicit_match or linked_files[0]).paper_id
+            blob_linked = True
 
     # 本地文件（用户上传）→ 路径安全校验
-    if file_path:
+    if file_path and not upload_id:
         try:
             pdf_path = _validate_user_local_file(file_path, user_id)
         except PermissionError as e:
@@ -257,24 +357,30 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
         except FileNotFoundError as e:
             return fail("paper_parse", str(e))
         is_local_file = True
-        if not resolved_paper_id:
-            resolved_paper_id = os.path.splitext(os.path.basename(file_path))[0]
+        paper_file_source = "legacy_upload"
+        paper_file_access_scope = "private"
+        try:
+            blob_id, stored = await _register_blob(pdf_path, "application/pdf")
+            blob_sha256 = stored.sha256
+            pdf_path = stored.storage_path
+        except Exception as e:
+            return fail("paper_parse", f"无法登记上传文件: {e}")
 
     async with get_connection() as conn:
         # 尝试从数据库获取论文信息
-        if paper_id:
-            paper = await get_paper(conn, paper_id)
+        if resolved_paper_id:
+            paper = await get_paper(conn, resolved_paper_id)
             if paper:
-                if paper.get("pdf_path") and os.path.exists(paper["pdf_path"]):
-                    if not _can_reuse_paper_pdf(paper, user_id):
+                if not pdf_path and paper.get("pdf_path") and os.path.exists(paper["pdf_path"]):
+                    if not owns_upload and not await _can_reuse_paper_pdf(paper, user_id):
                         return fail("paper_parse", "您无权访问该论文的本地 PDF。")
                     pdf_path = str(Path(paper["pdf_path"]).resolve())
                 elif paper.get("source") == "arxiv":
-                    arxiv_id = paper_id.replace("arxiv:", "")
+                    arxiv_id = resolved_paper_id.replace("arxiv:", "")
                     pdf_url = pdf_url or f"https://arxiv.org/pdf/{arxiv_id}"
                 elif paper.get("source") == "semantic_scholar":
                     if not pdf_url:
-                        pdf_url = _try_get_s2_pdf_url(paper_id)
+                        pdf_url = _try_get_s2_pdf_url(resolved_paper_id)
 
     # 下载 PDF（URL 来源 → 全局公共缓存）
     if not pdf_path:
@@ -285,6 +391,12 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
                 success = await _download_pdf(pdf_url, pdf_path)
                 if not success:
                     return fail("paper_parse", f"无法从 {pdf_url} 下载 PDF。")
+            try:
+                blob_id, stored = await _register_blob(pdf_path, "application/pdf", move=True)
+                blob_sha256 = stored.sha256
+                pdf_path = stored.storage_path
+            except Exception as e:
+                return fail("paper_parse", f"无法登记下载文件: {e}")
         else:
             return fail("paper_parse", "无法确定 PDF 来源。请提供 pdf_url。")
 
@@ -293,20 +405,41 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
 
     # 检查是否已经解析过
     async with get_connection() as conn:
-        if resolved_paper_id:
+        if resolved_paper_id and (not owns_upload or blob_linked):
             existing_chunks = await get_chunks_by_paper(conn, resolved_paper_id)
             if existing_chunks:
                 # 可见性校验：private 论文需要权限才能关联
                 paper = await get_paper(conn, resolved_paper_id)
-                if paper and paper.get("visibility") == "private":
+                if paper and paper.get("visibility") == "private" and not owns_upload:
                     creator = str(paper.get("created_by_user_id") or "")
                     if creator and creator != str(user_id or ""):
                         if not await _user_has_fulltext_access(user_id or "", resolved_paper_id):
                             return fail("paper_parse", f"论文 {resolved_paper_id} 是私有论文，您无权访问。")
-                await associate_user_paper(user_id, resolved_paper_id)
+                if blob_id is not None:
+                    from web.backend.repositories.upload_repo import link_paper_file
+                    await link_paper_file(
+                        conn,
+                        paper_id=resolved_paper_id,
+                        blob_id=blob_id,
+                        source=paper_file_source,
+                        access_scope=paper_file_access_scope,
+                    )
+                await _ensure_user_milvus_vectors(user_id, resolved_paper_id)
+                await associate_user_paper(
+                    user_id,
+                    resolved_paper_id,
+                    relation_type="uploaded" if owns_upload else "parsed",
+                    source="upload" if owns_upload else "paper_parse",
+                )
                 return ok(
                     "paper_parse",
-                    {"paper_id": resolved_paper_id, "already_parsed": True, "chunk_count": len(existing_chunks)},
+                    {
+                        "paper_id": resolved_paper_id,
+                        "upload_id": upload_id,
+                        "already_parsed": True,
+                        "deduplicated": bool(blob_id),
+                        "chunk_count": len(existing_chunks),
+                    },
                     summary=f"论文 {resolved_paper_id} 已解析（{len(existing_chunks)} 个分块）",
                     warnings=["如需重新解析，请先删除相关数据"],
                 )
@@ -331,6 +464,61 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
 
     if not markdown_text or len(markdown_text) < 100:
         return fail("paper_parse", "PDF 解析结果为空或过短。")
+
+    extracted_identifiers = extract_document_identifiers(markdown_text)
+    identity_candidates = canonicalize_identifiers([
+        *extracted_identifiers,
+        *([paper_id] if paper_id else []),
+    ])
+
+    async with get_connection() as conn:
+        identified_paper_id = await resolve_paper_id(conn, identity_candidates)
+        if blob_linked:
+            if identified_paper_id and identified_paper_id != resolved_paper_id:
+                return fail(
+                    "paper_parse",
+                    "文件指纹关联的论文与提取到的 DOI/arXiv 标识冲突，请人工核验。",
+                )
+        else:
+            resolved_paper_id = (
+                identified_paper_id
+                or (identity_candidates[0] if identity_candidates else None)
+                or (f"upload:sha256:{blob_sha256}" if blob_sha256 else None)
+            )
+
+        if not resolved_paper_id:
+            return fail("paper_parse", "无法为该 PDF 生成稳定论文标识。")
+
+        existing_chunks = await get_chunks_by_paper(conn, resolved_paper_id)
+        if existing_chunks:
+            await add_paper_identifiers(conn, resolved_paper_id, identity_candidates)
+            if blob_id is not None:
+                from web.backend.repositories.upload_repo import link_paper_file
+                await link_paper_file(
+                    conn,
+                    paper_id=resolved_paper_id,
+                    blob_id=blob_id,
+                    source=paper_file_source,
+                    access_scope=paper_file_access_scope,
+                )
+            await _ensure_user_milvus_vectors(user_id, resolved_paper_id)
+            await associate_user_paper(
+                user_id,
+                resolved_paper_id,
+                relation_type="uploaded" if owns_upload else "parsed",
+                source="upload" if owns_upload else "paper_parse",
+            )
+            return ok(
+                "paper_parse",
+                {
+                    "paper_id": resolved_paper_id,
+                    "upload_id": upload_id,
+                    "already_parsed": True,
+                    "deduplicated": True,
+                    "chunk_count": len(existing_chunks),
+                },
+                summary=f"论文 {resolved_paper_id} 已解析，已复用 {len(existing_chunks)} 个分块",
+            )
 
     # 按章节分割
     sections = split_into_sections(markdown_text)
@@ -401,11 +589,12 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
                 title = _extract_title_from_markdown(markdown_text)
                 paper_data = {
                     "id": resolved_paper_id,
+                    "identifiers": identity_candidates,
                     "title": title or resolved_paper_id,
                     "authors": [],
                     "abstract": "",
                     "year": None,
-                    "source": "parsed",
+                    "source": "upload" if is_local_file else "parsed",
                     "pdf_path": pdf_path,
                     "url": pdf_url,
                     "citation_count": 0,
@@ -413,18 +602,29 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
                 if is_local_file and user_id:
                     paper_data["visibility"] = "private"
                     paper_data["created_by_user_id"] = user_id
-                await upsert_paper(conn, paper_data)
+                resolved_paper_id = await upsert_paper(conn, paper_data)
             else:
+                await add_paper_identifiers(conn, resolved_paper_id, identity_candidates)
                 from web.backend.db.models import Paper
                 from sqlalchemy import select
                 result = await conn.execute(select(Paper).where(Paper.id == resolved_paper_id))
                 existing_row = result.scalar_one_or_none()
                 if existing_row:
-                    if existing_row.visibility == "private" and existing_row.created_by_user_id:
+                    if existing_row.visibility == "private" and existing_row.created_by_user_id and not owns_upload:
                         if str(existing_row.created_by_user_id) != str(user_id or ""):
                             if not await _user_has_fulltext_access(user_id or "", resolved_paper_id):
                                 return fail("paper_parse", "您无权更新该私有论文的 PDF 路径。")
                     existing_row.pdf_path = pdf_path
+
+        if blob_id is not None:
+            from web.backend.repositories.upload_repo import link_paper_file
+            await link_paper_file(
+                conn,
+                paper_id=resolved_paper_id,
+                blob_id=blob_id,
+                source=paper_file_source,
+                access_scope=paper_file_access_scope,
+            )
 
         chunk_ids = await insert_chunks(conn, resolved_paper_id, all_chunks)
 
@@ -487,7 +687,12 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
 
     # 关联用户与论文（PostgreSQL）
     if resolved_paper_id:
-        await associate_user_paper(user_id, resolved_paper_id)
+        await associate_user_paper(
+            user_id,
+            resolved_paper_id,
+            relation_type="uploaded" if owns_upload else "parsed",
+            source="upload" if owns_upload else "paper_parse",
+        )
 
     # 自动构建知识图谱（从摘要提取实体）
     kg_result = ""
@@ -526,7 +731,8 @@ async def handle_paper_parse(args: dict, user_id: str = None) -> str:
 
     data = {
         "paper_id": resolved_paper_id,
-        "pdf_path": pdf_path,
+        "upload_id": upload_id,
+        "deduplicated": False,
         "section_count": len(sections),
         "chunk_count": len(all_chunks),
         "embedding_done": bool(embeddings),

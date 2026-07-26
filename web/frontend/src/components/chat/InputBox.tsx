@@ -23,7 +23,7 @@ interface Props {
 
 export function InputBox({ onSend, onStop, disabled }: Props) {
   const [text, setText] = useState('')
-  const [attachments, setAttachments] = useState<Array<{ name: string; path: string }>>([])
+  const [attachments, setAttachments] = useState<Array<{ name: string; uploadId: string }>>([])
   const [uploading, setUploading] = useState(false)
   const [showSkills, setShowSkills] = useState(false)
   const [skillFilter, setSkillFilter] = useState('')
@@ -71,7 +71,7 @@ export function InputBox({ onSend, onStop, disabled }: Props) {
 
     let content = text.trim()
     if (attachments.length > 0) {
-      content += '\n\n附件：\n' + attachments.map((a) => `- ${a.name} (${a.path})`).join('\n')
+      content += '\n\n附件：\n' + attachments.map((a) => `- ${a.name} (upload_id: ${a.uploadId})`).join('\n')
     }
 
     onSend(content)
@@ -135,7 +135,7 @@ export function InputBox({ onSend, onStop, disabled }: Props) {
     for (const file of Array.from(files)) {
       try {
         const res = await uploadFile(file)
-        setAttachments((prev) => [...prev, { name: res.filename, path: res.file_path }])
+        setAttachments((prev) => [...prev, { name: res.filename, uploadId: res.upload_id }])
       } catch (err) {
         console.error('Upload failed:', err)
       }
@@ -153,7 +153,7 @@ export function InputBox({ onSend, onStop, disabled }: Props) {
     for (const file of Array.from(files)) {
       try {
         const res = await uploadFile(file)
-        setAttachments((prev) => [...prev, { name: res.filename, path: res.file_path }])
+        setAttachments((prev) => [...prev, { name: res.filename, uploadId: res.upload_id }])
       } catch (err) {
         console.error('Upload failed:', err)
       }

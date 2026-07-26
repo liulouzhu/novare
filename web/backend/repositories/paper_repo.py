@@ -1,9 +1,9 @@
 from uuid import UUID
 
-from sqlalchemy import or_, select
+from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from web.backend.db.models import Paper
+from web.backend.db.models import Paper, UserPaper
 from .base import SharedRepository
 
 
@@ -18,20 +18,34 @@ class PaperRepository(SharedRepository):
         return result.scalar_one_or_none()
 
     async def get_visible(self, paper_id: str, user_id: UUID | None = None) -> Paper | None:
-        """获取论文，仅返回当前用户有权访问的（public 或自己创建的 private）。"""
+        """Return public, owned, or explicitly associated papers."""
         stmt = select(Paper).where(Paper.id == paper_id)
         if user_id:
-            stmt = stmt.where(or_(Paper.visibility == "public", Paper.created_by_user_id == user_id))
+            stmt = stmt.where(or_(
+                Paper.visibility == "public",
+                Paper.created_by_user_id == user_id,
+                exists().where(
+                    UserPaper.paper_id == Paper.id,
+                    UserPaper.user_id == user_id,
+                ),
+            ))
         else:
             stmt = stmt.where(Paper.visibility == "public")
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
 
     async def get_all(self, q: str | None = None, user_id: UUID | None = None) -> list[Paper]:
-        """列出论文：public 全部可见，private 仅创建者可见。"""
+        """List public, owned, or explicitly associated papers."""
         stmt = select(Paper)
         if user_id:
-            stmt = stmt.where(or_(Paper.visibility == "public", Paper.created_by_user_id == user_id))
+            stmt = stmt.where(or_(
+                Paper.visibility == "public",
+                Paper.created_by_user_id == user_id,
+                exists().where(
+                    UserPaper.paper_id == Paper.id,
+                    UserPaper.user_id == user_id,
+                ),
+            ))
         else:
             stmt = stmt.where(Paper.visibility == "public")
         if q:

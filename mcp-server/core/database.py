@@ -39,10 +39,79 @@ async def get_connection():
 
 # ── Paper CRUD ────────────────────────────────────────────────────────────
 
-async def upsert_paper(conn, paper: dict) -> None:
-    """插入或更新论文元数据"""
+async def resolve_paper_id(conn, identifiers: list[str]) -> str | None:
+    """Resolve any canonical external identifier to the shared internal paper ID."""
+    from core.paper_id import canonicalize_identifiers
+    from web.backend.db.models import Paper, PaperIdentifier
+    from sqlalchemy import select
+
+    canonical = canonicalize_identifiers(identifiers)
+    if not canonical:
+        return None
+
+    result = await conn.execute(
+        select(PaperIdentifier.identifier, PaperIdentifier.paper_id)
+        .where(PaperIdentifier.identifier.in_(canonical))
+    )
+    aliases = {identifier: paper_id for identifier, paper_id in result.all()}
+    for identifier in canonical:
+        if identifier in aliases:
+            return aliases[identifier]
+
+    result = await conn.execute(select(Paper.id).where(Paper.id.in_(canonical)))
+    existing = set(result.scalars().all())
+    return next((identifier for identifier in canonical if identifier in existing), None)
+
+
+async def add_paper_identifiers(conn, paper_id: str, identifiers: list[str]) -> None:
+    from core.paper_id import canonicalize_identifiers, identifier_type
+    from web.backend.db.models import PaperIdentifier
+
+    canonical = canonicalize_identifiers(identifiers)
+    if not canonical:
+        return
+
+    dialect = conn.get_bind().dialect.name
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
+    elif dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert
+    else:
+        insert = None
+
+    if insert is not None:
+        for identifier in canonical:
+            statement = insert(PaperIdentifier).values(
+                paper_id=paper_id,
+                identifier_type=identifier_type(identifier),
+                identifier=identifier,
+            ).on_conflict_do_nothing(index_elements=["identifier"])
+            await conn.execute(statement)
+    else:
+        from sqlalchemy import select
+        for identifier in canonical:
+            result = await conn.execute(
+                select(PaperIdentifier).where(PaperIdentifier.identifier == identifier)
+            )
+            if result.scalar_one_or_none() is None:
+                conn.add(PaperIdentifier(
+                    paper_id=paper_id,
+                    identifier_type=identifier_type(identifier),
+                    identifier=identifier,
+                ))
+    await conn.flush()
+
+
+async def upsert_paper(conn, paper: dict) -> str:
+    """Insert/update paper metadata and return its resolved shared identity."""
+    from core.paper_id import canonicalize_identifiers, canonicalize_paper_id
     from web.backend.db.models import Paper
     from sqlalchemy import select
+
+    incoming_id = canonicalize_paper_id(paper["id"])
+    identifiers = canonicalize_identifiers([incoming_id, *(paper.get("identifiers") or [])])
+    resolved_id = await resolve_paper_id(conn, identifiers) or incoming_id
+    paper["id"] = resolved_id
 
     authors = paper.get("authors", [])
     if isinstance(authors, str):
@@ -61,7 +130,11 @@ async def upsert_paper(conn, paper: dict) -> None:
             existing.abstract = paper["abstract"]
         if paper.get("year"):
             existing.year = paper["year"]
-        if paper.get("source"):
+        if paper.get("source") and (
+            not existing.source
+            or existing.source == "parsed"
+            or paper["source"] not in {"parsed", "upload"}
+        ):
             existing.source = paper["source"]
         if paper.get("pdf_path"):
             existing.pdf_path = paper["pdf_path"]
@@ -71,8 +144,8 @@ async def upsert_paper(conn, paper: dict) -> None:
             existing.citation_count = max(
                 existing.citation_count or 0, paper["citation_count"]
             )
-        if paper.get("visibility") and existing.visibility != "private":
-            existing.visibility = paper["visibility"]
+        if paper.get("visibility") == "public":
+            existing.visibility = "public"
         if paper.get("created_by_user_id") and not existing.created_by_user_id:
             existing.created_by_user_id = paper["created_by_user_id"]
     else:
@@ -90,6 +163,8 @@ async def upsert_paper(conn, paper: dict) -> None:
             created_by_user_id=paper.get("created_by_user_id"),
         ))
     await conn.flush()
+    await add_paper_identifiers(conn, resolved_id, identifiers)
+    return resolved_id
 
 
 async def get_paper(conn, paper_id: str) -> Optional[dict]:

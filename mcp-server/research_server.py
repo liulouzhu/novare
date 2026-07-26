@@ -78,7 +78,8 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "paper_id": {"type": "string", "description": "论文 ID（Semantic Scholar ID 或 arXiv ID）"},
                     "pdf_url": {"type": "string", "description": "直接提供 PDF URL（与 paper_id 二选一）"},
-                    "file_path": {"type": "string", "description": "本地 PDF 文件路径（与 paper_id/pdf_url 三选一）"},
+                    "upload_id": {"type": "string", "description": "Web 上传返回的 upload_id（推荐，自动校验当前用户权限并去重）"},
+                    "file_path": {"type": "string", "description": "兼容 CLI 的本地 PDF 路径；Web 上传请使用 upload_id"},
                 },
             },
         ),

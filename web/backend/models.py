@@ -74,8 +74,10 @@ class PaperFullTextOut(BaseModel):
 
 
 class UploadResponse(BaseModel):
+    upload_id: str
     filename: str
-    file_path: str
+    already_uploaded: bool = False
+    file_path: str | None = None
     message: str
 
 

@@ -205,7 +205,15 @@ export async function deletePaper(paperId: string): Promise<void> {
 
 // ── Upload ──
 
-export async function uploadFile(file: File): Promise<{ filename: string; file_path: string; message: string }> {
+export interface UploadResult {
+  upload_id: string
+  filename: string
+  already_uploaded: boolean
+  file_path?: string | null
+  message: string
+}
+
+export async function uploadFile(file: File): Promise<UploadResult> {
   const form = new FormData()
   form.append('file', file)
   const res = await fetch(`${BASE}/api/upload`, { method: 'POST', body: form, headers: authHeaders() })

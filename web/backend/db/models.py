@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Column, String, Integer, Text, Boolean, DateTime, Float, LargeBinary,
+    Column, String, Integer, BigInteger, Text, Boolean, DateTime, Float, LargeBinary,
     ForeignKey, UniqueConstraint, Index, CheckConstraint, JSON,
     TypeDecorator,
 )
@@ -83,6 +83,77 @@ class Paper(Base):
     created_by_user_id = Column(GUID(), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class PaperIdentifier(Base):
+    """Canonical external identifiers that resolve to one shared paper."""
+    __tablename__ = "paper_identifiers"
+    __table_args__ = (
+        UniqueConstraint("identifier", name="uq_paper_identifier"),
+        Index("idx_paper_identifiers_paper", "paper_id"),
+    )
+
+    id = Column(GUID(), primary_key=True, default=gen_uuid)
+    paper_id = Column(String(255), ForeignKey("papers.id", ondelete="CASCADE"), nullable=False)
+    identifier_type = Column(String(20), nullable=False)
+    identifier = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    paper = relationship("Paper")
+
+
+class FileBlob(Base):
+    """Content-addressed file stored once globally and authorized through UserUpload."""
+    __tablename__ = "file_blobs"
+    __table_args__ = (
+        UniqueConstraint("sha256", name="uq_file_blob_sha256"),
+    )
+
+    id = Column(GUID(), primary_key=True, default=gen_uuid)
+    sha256 = Column(String(64), nullable=False, index=True)
+    size_bytes = Column(BigInteger, nullable=False)
+    mime_type = Column(String(255))
+    storage_path = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class UserUpload(Base):
+    """User-scoped authorization and metadata for a globally deduplicated blob."""
+    __tablename__ = "user_uploads"
+    __table_args__ = (
+        UniqueConstraint("user_id", "blob_id", name="uq_user_upload_blob"),
+        Index("idx_user_uploads_user", "user_id"),
+    )
+
+    id = Column(GUID(), primary_key=True, default=gen_uuid)
+    user_id = Column(GUID(), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    blob_id = Column(GUID(), ForeignKey("file_blobs.id"), nullable=False, index=True)
+    original_filename = Column(String(512), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    user = relationship("User")
+    blob = relationship("FileBlob")
+
+
+class PaperFile(Base):
+    """A paper version backed by a deduplicated file blob."""
+    __tablename__ = "paper_files"
+    __table_args__ = (
+        UniqueConstraint("paper_id", "blob_id", name="uq_paper_file_blob"),
+        CheckConstraint("access_scope IN ('public', 'private')", name="ck_paper_file_access_scope"),
+        Index("idx_paper_files_blob", "blob_id"),
+    )
+
+    id = Column(GUID(), primary_key=True, default=gen_uuid)
+    paper_id = Column(String(255), ForeignKey("papers.id", ondelete="CASCADE"), nullable=False)
+    blob_id = Column(GUID(), ForeignKey("file_blobs.id"), nullable=False)
+    source = Column(String(30), nullable=False, default="upload", server_default="upload")
+    version = Column(String(50))
+    access_scope = Column(String(10), nullable=False, default="private", server_default="private")
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    paper = relationship("Paper")
+    blob = relationship("FileBlob")
 
 
 class UserPaper(Base):
