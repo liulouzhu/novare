@@ -54,6 +54,13 @@ class NovareConfig:
     context_llm_timeout: int = 30            # 单次压缩 LLM 调用超时
     context_llm_enabled: bool = True         # 失败时自动回退纯规则摘要
 
+    # RAG 回答幻觉检测
+    hallucination_verifier_enabled: bool = False
+    hallucination_verifier_max_claims: int = 12
+    hallucination_verifier_top_k: int = 5
+    hallucination_verifier_concurrency: int = 3
+    hallucination_verifier_timeout: int = 120
+
     # 长期记忆
     enable_long_term_memory: bool = True    # 是否启用长期记忆
     max_memories_per_user: int = 50         # 每个用户最大记忆条数
@@ -196,6 +203,22 @@ class NovareConfig:
         if context_llm_enabled is not None:
             cfg.context_llm_enabled = context_llm_enabled.lower() in ("1", "true", "yes")
 
+        verifier_enabled = os.environ.get("NOVARE_HALLUCINATION_VERIFIER_ENABLED")
+        if verifier_enabled is not None:
+            cfg.hallucination_verifier_enabled = verifier_enabled.lower() in ("1", "true", "yes")
+        verifier_max_claims = os.environ.get("NOVARE_HALLUCINATION_VERIFIER_MAX_CLAIMS")
+        if verifier_max_claims:
+            cfg.hallucination_verifier_max_claims = int(verifier_max_claims)
+        verifier_top_k = os.environ.get("NOVARE_HALLUCINATION_VERIFIER_TOP_K")
+        if verifier_top_k:
+            cfg.hallucination_verifier_top_k = int(verifier_top_k)
+        verifier_concurrency = os.environ.get("NOVARE_HALLUCINATION_VERIFIER_CONCURRENCY")
+        if verifier_concurrency:
+            cfg.hallucination_verifier_concurrency = int(verifier_concurrency)
+        verifier_timeout = os.environ.get("NOVARE_HALLUCINATION_VERIFIER_TIMEOUT")
+        if verifier_timeout:
+            cfg.hallucination_verifier_timeout = int(verifier_timeout)
+
         # 情景记忆
         ep_enabled = os.environ.get("NOVARE_EPISODIC_MEMORY_ENABLED")
         if ep_enabled is not None:
@@ -248,6 +271,20 @@ class NovareConfig:
         cfg.context_summary_max_tokens = max(300, min(8_000, cfg.context_summary_max_tokens))
         cfg.context_tool_result_max_tokens = max(200, min(5_000, cfg.context_tool_result_max_tokens))
         cfg.context_llm_timeout = max(1, min(120, cfg.context_llm_timeout))
+
+        # 幻觉检测配置校验
+        cfg.hallucination_verifier_max_claims = max(
+            1, min(15, cfg.hallucination_verifier_max_claims)
+        )
+        cfg.hallucination_verifier_top_k = max(
+            1, min(10, cfg.hallucination_verifier_top_k)
+        )
+        cfg.hallucination_verifier_concurrency = max(
+            1, min(8, cfg.hallucination_verifier_concurrency)
+        )
+        cfg.hallucination_verifier_timeout = max(
+            10, min(600, cfg.hallucination_verifier_timeout)
+        )
 
         # 批量记忆提取配置校验
         cfg.memory_extraction_interval_turns = max(1, min(50, cfg.memory_extraction_interval_turns))

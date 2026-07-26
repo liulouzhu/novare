@@ -22,6 +22,7 @@ from novare.task_state import TaskState, TaskStateManager
 from novare.tool_result import parse_tool_result
 
 if TYPE_CHECKING:
+    from novare.hallucination_verifier import HallucinationVerifier
     from novare.llm_client import LLMClient
 
 
@@ -61,6 +62,7 @@ class AgentLoop:
         context_llm_timeout: float = 30.0,
         context_llm_enabled: bool = True,
         context_compactor: HybridContextCompactor | None = None,
+        hallucination_verifier: HallucinationVerifier | None = None,
     ):
         self.llm_client = llm_client
         self.tool_registry: ToolExecutor = tool_registry
@@ -78,6 +80,7 @@ class AgentLoop:
             llm_timeout=context_llm_timeout,
             llm_enabled=context_llm_enabled,
         )
+        self.hallucination_verifier = hallucination_verifier
         self.turn_timeout = turn_timeout
 
     async def run_turn(
@@ -93,6 +96,7 @@ class AgentLoop:
         on_compact: Callable[[object], Awaitable[None] | None] | None = None,
         should_cancel: Callable[[], Awaitable[bool] | bool] | None = None,
         on_message: Callable[[dict], Awaitable[None] | None] | None = None,
+        on_verification: Callable[[dict], Awaitable[None] | None] | None = None,
     ) -> str:
         """执行一轮对话，带 per-turn 超时保护。
 
@@ -104,7 +108,11 @@ class AgentLoop:
         """
         try:
             return await asyncio.wait_for(
-                self._run_turn_core(session, user_input, on_text, on_tool, tool_context, on_task_state, system_prompt, autosave, on_compact, should_cancel, on_message),
+                self._run_turn_core(
+                    session, user_input, on_text, on_tool, tool_context,
+                    on_task_state, system_prompt, autosave, on_compact,
+                    should_cancel, on_message, on_verification,
+                ),
                 timeout=self.turn_timeout,
             )
         except asyncio.TimeoutError:
@@ -124,6 +132,7 @@ class AgentLoop:
         on_compact: Callable[[object], Awaitable[None] | None] | None = None,
         should_cancel: Callable[[], Awaitable[bool] | bool] | None = None,
         on_message: Callable[[dict], Awaitable[None] | None] | None = None,
+        on_verification: Callable[[dict], Awaitable[None] | None] | None = None,
     ) -> str:
         """执行一轮对话的核心逻辑：用户输入 → LLM（流式） → 工具循环 → 最终回答
 
@@ -141,6 +150,7 @@ class AgentLoop:
         # ── Turn-scoped TaskState：每次 run_turn 独立持有 ──
         task_mgr = TaskStateManager()
         task_mgr.init_turn(user_input)
+        rag_used = False
 
         try:
             # 将 reviewer_llm 注入 tool_context，供 reviewer_evaluate 工具使用
@@ -168,10 +178,15 @@ class AgentLoop:
                 if await self._preflight_compact(session, messages, task_mgr.state, system_prompt=effective_prompt, autosave=autosave, on_compact=on_compact):
                     messages = self._build_messages(session, task_state=task_mgr.state, system_prompt=effective_prompt)
 
-                # 流式调用 LLM，on_text 实时输出
+                # RAG 已使用时缓冲最终草稿，避免先向用户发送未经验证的内容。
                 tools = self.tool_registry.to_openai_tools()
+                should_buffer = bool(
+                    rag_used
+                    and self.hallucination_verifier
+                    and self.hallucination_verifier.enabled
+                )
                 response = await self.llm_client.collect_stream(
-                    messages, tools=tools, on_text=on_text,
+                    messages, tools=tools, on_text=None if should_buffer else on_text,
                 )
 
                 # 追踪 usage（用于触发自动压缩）
@@ -186,10 +201,28 @@ class AgentLoop:
 
                 # 如果没有工具调用，检查是否需要压缩后返回
                 if not response.tool_calls:
-                    session.add_assistant_message(response.content)
+                    final_content = response.content
+                    verification_report = None
+                    if should_buffer and self.hallucination_verifier:
+                        verification = await self.hallucination_verifier.verify(
+                            answer=response.content,
+                            user_question=user_input,
+                            tool_context=tool_context,
+                        )
+                        final_content = verification.corrected_answer
+                        verification_report = verification.to_dict()
+                        await self._emit_verification(
+                            on_verification, verification_report
+                        )
+                        if on_text and final_content:
+                            on_text(final_content)
+
+                    session.add_assistant_message(final_content)
+                    if verification_report is not None:
+                        session.messages[-1]["_verification"] = verification_report
                     await self._emit_message(on_message, session.messages[-1])
                     await self._maybe_auto_compact(session, system_prompt=effective_prompt, autosave=autosave, on_compact=on_compact)
-                    return response.content
+                    return final_content
 
                 # 有工具调用：记录 assistant 消息（含 tool_calls）
                 tool_calls_dicts = [
@@ -218,6 +251,8 @@ class AgentLoop:
                     # 结构化错误检测（JSON ok 字段优先，降级到 startswith 兼容旧格式）
                     parsed_result = parse_tool_result(result)
                     is_error = not parsed_result.ok
+                    if tc.name == "rag_query" and parsed_result.ok:
+                        rag_used = True
                     if is_error:
                         if on_tool:
                             on_tool("error", tc.name, tc.arguments, result, elapsed)
@@ -251,6 +286,17 @@ class AgentLoop:
         if callback is None:
             return
         result = callback(dict(message))
+        if asyncio.iscoroutine(result):
+            await result
+
+    @staticmethod
+    async def _emit_verification(
+        callback: Callable[[dict], Awaitable[None] | None] | None,
+        report: dict,
+    ) -> None:
+        if callback is None:
+            return
+        result = callback(dict(report))
         if asyncio.iscoroutine(result):
             await result
 

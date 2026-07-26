@@ -195,7 +195,8 @@ def register_subagent_tools(
         description=(
             "创建一个子智能体来执行研究子任务。"
             "子智能体类型：search（文献搜索）、analyzer（数据分析）、"
-            "writer（报告撰写）、explorer（只读探索）、general（通用）。"
+            "writer（报告撰写）、explorer（只读探索）、"
+            "verifier（只读证据核验）、general（通用）。"
             "默认异步执行，返回子智能体 ID；设置 await_result=true 可等待结果。"
         ),
         parameters={

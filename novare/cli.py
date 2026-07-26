@@ -14,6 +14,7 @@ from novare.session import Session
 from novare.tools.registry import ToolRegistry, ToolDef
 from novare.mcp_client import McpClient
 from novare.agent_loop import AgentLoop
+from novare.hallucination_verifier import HallucinationVerifier
 from novare.skill import Skill, discover_skills
 from novare.subagents.registry import SubagentRegistry
 from novare.subagents.tools import register_subagent_tools
@@ -152,6 +153,18 @@ async def main():
         except Exception as e:
             logger.error("Failed to connect to MCP server '%s': %s", name, e)
 
+    hallucination_verifier = None
+    if config.hallucination_verifier_enabled:
+        hallucination_verifier = HallucinationVerifier(
+            llm_client=llm_client,
+            tool_executor=tool_registry,
+            enabled=True,
+            max_claims=config.hallucination_verifier_max_claims,
+            top_k=config.hallucination_verifier_top_k,
+            max_concurrency=config.hallucination_verifier_concurrency,
+            timeout=config.hallucination_verifier_timeout,
+        )
+
     # 创建 AgentLoop
     agent = AgentLoop(
         llm_client=llm_client,
@@ -166,6 +179,7 @@ async def main():
         context_tool_result_max_tokens=config.context_tool_result_max_tokens,
         context_llm_timeout=config.context_llm_timeout,
         context_llm_enabled=config.context_llm_enabled,
+        hallucination_verifier=hallucination_verifier,
         turn_timeout=config.turn_timeout,
     )
 

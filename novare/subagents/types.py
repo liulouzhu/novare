@@ -15,6 +15,7 @@ class SubagentType(str, Enum):
     ANALYZER = "analyzer"    # 数据分析：code_execute, rag_query, read_file, glob/grep
     WRITER = "writer"        # 报告撰写：read/write/edit_file, rag_query, glob/grep
     EXPLORER = "explorer"    # 只读探索：read_file, glob/grep, rag_query
+    VERIFIER = "verifier"    # 幻觉检测：反向 RAG + 只读证据核验
     GENERAL = "general"      # 通用：除 spawn/check/reviewer 外的所有工具
 
 
@@ -45,6 +46,9 @@ SUBAGENT_TOOL_ALLOWLISTS: dict[SubagentType, set[str]] = {
     },
     SubagentType.EXPLORER: {
         "read_file", "glob_search", "grep_search", "rag_query",
+    },
+    SubagentType.VERIFIER: {
+        "rag_query", "read_file", "glob_search", "grep_search",
     },
     SubagentType.GENERAL: set(),  # 空集 = 运行时动态填充（排除 _EXCLUDED_TOOLS）
 }

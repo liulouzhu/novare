@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from novare.agent_loop import AgentLoop  # noqa: E402
 from novare.config import NovareConfig, get_user_workspace  # noqa: E402
 from novare.context_manager import estimate_messages_tokens  # noqa: E402
+from novare.hallucination_verifier import HallucinationVerifier  # noqa: E402
 from novare.llm_client import LLMClient  # noqa: E402
 from novare.mcp_client import McpClient  # noqa: E402
 from novare.session import Session  # noqa: E402
@@ -57,6 +58,7 @@ class AgentService:
         self.episodic_memory_service: EpisodicMemoryService | None = None
         self.memory_coordinator: MemoryExtractionCoordinator | None = None
         self.memory_scheduler: MemoryExtractionScheduler | None = None
+        self.hallucination_verifier: HallucinationVerifier | None = None
         self.subagent_registry: SubagentRegistry | None = None
         self._mcp_clients: list[McpClient] = []
 
@@ -159,6 +161,19 @@ class AgentService:
         else:
             self.memory_scheduler = None
 
+        if self.config.hallucination_verifier_enabled:
+            self.hallucination_verifier = HallucinationVerifier(
+                llm_client=self.reviewer_llm or self.llm_client,
+                tool_executor=self.tool_registry,
+                enabled=True,
+                max_claims=self.config.hallucination_verifier_max_claims,
+                top_k=self.config.hallucination_verifier_top_k,
+                max_concurrency=self.config.hallucination_verifier_concurrency,
+                timeout=self.config.hallucination_verifier_timeout,
+            )
+        else:
+            self.hallucination_verifier = None
+
         self.agent = AgentLoop(
             llm_client=self.llm_client,
             tool_registry=self.tool_registry,
@@ -173,6 +188,7 @@ class AgentService:
             context_tool_result_max_tokens=self.config.context_tool_result_max_tokens,
             context_llm_timeout=self.config.context_llm_timeout,
             context_llm_enabled=self.config.context_llm_enabled,
+            hallucination_verifier=self.hallucination_verifier,
             turn_timeout=self.config.turn_timeout,
         )
 
@@ -475,6 +491,9 @@ class AgentService:
             def on_task_state(state_dict: dict):
                 queue.put_nowait({"type": "task_state", **state_dict})
 
+            def on_verification(report: dict):
+                queue.put_nowait({"type": "verification", **report})
+
             ctx = {"user_id": user_id, "workspace": str(self._workspace_for(user_id))} if user_id else None
 
             result = await self.agent.run_turn(
@@ -488,6 +507,7 @@ class AgentService:
                 on_compact=_on_compact,
                 should_cancel=_check_cancel if cancel_key else None,
                 on_message=_on_message,
+                on_verification=on_verification,
             )
 
             # ── 协作式取消检测 ──

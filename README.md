@@ -346,3 +346,22 @@ RRF(d) = Σ 1 / (k + rank_i(d))
 检索始终受用户论文权限约束。`paper_id` 或 `paper_ids` 过滤会与用户可访问论文集合取交集，不允许借助过滤参数读取未授权论文。
 
 新解析的论文会自动同步到 Elasticsearch。升级混合检索前已经解析的历史论文需要重新解析或单独执行索引回填，否则 BM25 通道无法召回这些旧分块。
+
+## RAG 回答验证
+
+Novare 可在 RAG 回答发送前启用只读 Verifier，对回答进行二次证据核验：
+
+1. 将回答拆分为最多 12 条原子事实。
+2. 在当前用户有权限的论文中对每条事实执行反向 RAG。
+3. 判定为 `SUPPORTED`、`CONTRADICTED` 或 `NOT_ENOUGH_EVIDENCE`，并聚合整体风险。
+4. 保留受支持内容，修正冲突内容，删除或弱化证据不足的表述。
+
+验证报告会包含事实、判定、风险，以及对应的 `paper_id`、`chunk_id`、章节、原文片段和检索分数。验证失败或超时时返回原始回答，不中断主任务。该功能默认关闭，因为一次回答会增加 2～3 次 LLM 调用，并对每条事实增加一次 RAG 查询。
+
+```env
+NOVARE_HALLUCINATION_VERIFIER_ENABLED=true
+NOVARE_HALLUCINATION_VERIFIER_MAX_CLAIMS=12
+NOVARE_HALLUCINATION_VERIFIER_TOP_K=5
+NOVARE_HALLUCINATION_VERIFIER_CONCURRENCY=3
+NOVARE_HALLUCINATION_VERIFIER_TIMEOUT=120
+```

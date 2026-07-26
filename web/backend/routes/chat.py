@@ -41,6 +41,7 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
         {"type": "tool_end", "tool": "...", "result": "...", "duration": 2.3}
         {"type": "tool_error", "tool": "...", "error": "..."}
         {"type": "task_state", "goal": "...", "completed": [...], "pending": [...], ...}
+        {"type": "verification", "status": "revised", "risk_level": "high", ...}
         {"type": "done"}
         {"type": "error", "message": "..."}
     """

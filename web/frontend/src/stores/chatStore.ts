@@ -1,7 +1,7 @@
 /** 聊天消息状态管理 */
 
 import { create } from 'zustand'
-import { type Message, type ToolCallState, type TaskState, type MessagePart } from '@/lib/ws'
+import { type Message, type ToolCallState, type TaskState, type MessagePart, type VerificationReport } from '@/lib/ws'
 import { generateId } from '@/lib/utils'
 
 interface ChatStore {
@@ -21,6 +21,7 @@ interface ChatStore {
   setStreaming: (streaming: boolean) => void
   setMessages: (sessionId: string, messages: Message[]) => void
   updateTaskState: (messageId: string, state: TaskState) => void
+  updateVerification: (messageId: string, report: VerificationReport) => void
   clearSession: (sessionId: string) => void
 }
 
@@ -166,6 +167,22 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
       }
       return { messagesBySession: newBySession, streamingTaskState: state }
+    })
+  },
+
+  updateVerification: (messageId: string, report: VerificationReport) => {
+    set((s) => {
+      const newBySession = { ...s.messagesBySession }
+      for (const sid of Object.keys(newBySession)) {
+        const msgs = newBySession[sid]
+        const idx = msgs.findIndex((m) => m.id === messageId)
+        if (idx !== -1) {
+          newBySession[sid] = [...msgs]
+          newBySession[sid][idx] = { ...msgs[idx], verification: report }
+          break
+        }
+      }
+      return { messagesBySession: newBySession }
     })
   },
 

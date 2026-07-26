@@ -101,6 +101,7 @@ export function useChat(sessionId: string) {
     addToolCall,
     updateToolCall,
     updateTaskState,
+    updateVerification,
     finishMessage,
     setStreaming,
     setMessages,
@@ -203,6 +204,13 @@ export function useChat(sessionId: string) {
         useSessionStore.getState().loadSessions()
         break
 
+      case 'verification':
+        if (assistantMsgId.current) {
+          const { type: _type, ...report } = event
+          updateVerification(assistantMsgId.current, report)
+        }
+        break
+
       case 'cancelled':
         if (assistantMsgId.current) {
           appendText(assistantMsgId.current, `\n\n${event.message}`)
@@ -225,7 +233,7 @@ export function useChat(sessionId: string) {
         useSessionStore.getState().loadSessions()
         break
     }
-  }, [appendText, addToolCall, updateToolCall, updateTaskState, finishMessage, setStreaming])
+  }, [appendText, addToolCall, updateToolCall, updateTaskState, updateVerification, finishMessage, setStreaming])
 
   const { connected, sendMessage } = useWebSocket({ sessionId, onEvent: handleEvent })
 
