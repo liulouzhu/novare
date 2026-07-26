@@ -167,6 +167,12 @@ class AgentService:
             max_iterations=self.config.max_iterations,
             auto_compact_threshold=self.config.auto_compact_threshold,
             preserve_recent_messages=self.config.preserve_recent_messages,
+            context_max_turns=self.config.context_max_turns,
+            context_token_budget=self.config.context_token_budget,
+            context_summary_max_tokens=self.config.context_summary_max_tokens,
+            context_tool_result_max_tokens=self.config.context_tool_result_max_tokens,
+            context_llm_timeout=self.config.context_llm_timeout,
+            context_llm_enabled=self.config.context_llm_enabled,
             turn_timeout=self.config.turn_timeout,
         )
 
@@ -626,6 +632,7 @@ class AgentService:
                     snapshot_data=deepcopy(session.messages),
                     compacted_through_message_id=last_raw_message_id,
                     estimated_tokens=estimate_messages_tokens(session.messages),
+                    schema_version=_context_snapshot_schema_version(session.messages),
                 )
                 if snapshot is None:
                     raise PermissionError(
@@ -677,6 +684,15 @@ def _message_models_to_dicts(messages) -> list[dict]:
         }
         for message in messages
     ]
+
+
+def _context_snapshot_schema_version(messages: list[dict]) -> int:
+    versions = [
+        message.get("_compaction_meta", {}).get("schema_version", 1)
+        for message in messages
+        if message.get("_compaction_meta")
+    ]
+    return max((int(version) for version in versions), default=1)
 
 
 def _extract_title_from_text(content: str) -> str:

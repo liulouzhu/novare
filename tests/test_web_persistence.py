@@ -31,6 +31,7 @@ def _make_loop(responses: list[LLMResponse], auto_compact_threshold: int = 100_0
         system_prompt="You are a test assistant.",
         auto_compact_threshold=auto_compact_threshold,
         preserve_recent_messages=preserve_recent,
+        context_llm_enabled=False,
     )
 
 
@@ -200,3 +201,25 @@ class TestRawMessageCallback:
         ]
         assert captured[0]["content"] == "new request"
         assert captured[2]["tool_call_id"] == "tc1"
+
+
+def test_build_messages_strips_internal_compaction_metadata():
+    loop = _make_loop([], auto_compact_threshold=100_000)
+    session = _make_session_with_messages(0)
+    session.messages = [{
+        "role": "tool",
+        "content": "compressed result",
+        "tool_call_id": "tc1",
+        "_compacted_tool_result": True,
+        "_compaction_meta": {"schema_version": 2},
+    }]
+
+    messages = loop._build_messages(session)
+
+    assert messages[-1] == {
+        "role": "tool",
+        "content": "compressed result",
+        "tool_call_id": "tc1",
+    }
+    assert "_compaction_meta" not in messages[-1]
+    assert "_compacted_tool_result" not in messages[-1]

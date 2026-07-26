@@ -158,6 +158,14 @@ async def main():
         tool_registry=tool_registry,
         system_prompt=config.system_prompt,
         max_iterations=config.max_iterations,
+        auto_compact_threshold=config.auto_compact_threshold,
+        preserve_recent_messages=config.preserve_recent_messages,
+        context_max_turns=config.context_max_turns,
+        context_token_budget=config.context_token_budget,
+        context_summary_max_tokens=config.context_summary_max_tokens,
+        context_tool_result_max_tokens=config.context_tool_result_max_tokens,
+        context_llm_timeout=config.context_llm_timeout,
+        context_llm_enabled=config.context_llm_enabled,
         turn_timeout=config.turn_timeout,
     )
 

@@ -1,10 +1,12 @@
-"""novare/context_manager.py — 上下文窗口管理
+"""novare/context_manager.py — 上下文 token 估算与规则 fallback
 
 借鉴 Claw Code 的设计：
 - 启发式 token 估算（chars/4）
 - API usage 追踪（累积 input_tokens）
-- 阈值触发自动压缩（摘要 + 保留最近 N 条）
-- 压缩不调 LLM，纯文本提取
+- 旧版消息数压缩（保留为无 LLM fallback 和兼容 API）
+
+主运行路径的完整轮次、token 预算和 LLM 混合压缩位于
+novare.context_compactor。
 """
 
 from __future__ import annotations

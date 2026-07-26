@@ -46,7 +46,13 @@ class NovareConfig:
 
     # 上下文管理
     auto_compact_threshold: int = 100_000   # 累积 input tokens 超过此值触发自动压缩
-    preserve_recent_messages: int = 4       # 压缩时保留最近 N 条消息
+    preserve_recent_messages: int = 4       # 旧版配置兼容；混合压缩不按消息条数裁剪
+    context_max_turns: int = 3              # 最多保留的完整用户轮次
+    context_token_budget: int = 12_000       # 压缩后工作上下文软预算
+    context_summary_max_tokens: int = 2_500  # LLM 结构化摘要输出上限
+    context_tool_result_max_tokens: int = 1_200  # 单个压缩工具结果上限
+    context_llm_timeout: int = 30            # 单次压缩 LLM 调用超时
+    context_llm_enabled: bool = True         # 失败时自动回退纯规则摘要
 
     # 长期记忆
     enable_long_term_memory: bool = True    # 是否启用长期记忆
@@ -171,6 +177,24 @@ class NovareConfig:
         preserve_recent = os.environ.get("NOVARE_PRESERVE_RECENT_MESSAGES")
         if preserve_recent:
             cfg.preserve_recent_messages = int(preserve_recent)
+        context_max_turns = os.environ.get("NOVARE_CONTEXT_MAX_TURNS")
+        if context_max_turns:
+            cfg.context_max_turns = int(context_max_turns)
+        context_token_budget = os.environ.get("NOVARE_CONTEXT_TOKEN_BUDGET")
+        if context_token_budget:
+            cfg.context_token_budget = int(context_token_budget)
+        context_summary_max = os.environ.get("NOVARE_CONTEXT_SUMMARY_MAX_TOKENS")
+        if context_summary_max:
+            cfg.context_summary_max_tokens = int(context_summary_max)
+        context_tool_max = os.environ.get("NOVARE_CONTEXT_TOOL_RESULT_MAX_TOKENS")
+        if context_tool_max:
+            cfg.context_tool_result_max_tokens = int(context_tool_max)
+        context_llm_timeout = os.environ.get("NOVARE_CONTEXT_LLM_TIMEOUT")
+        if context_llm_timeout:
+            cfg.context_llm_timeout = int(context_llm_timeout)
+        context_llm_enabled = os.environ.get("NOVARE_CONTEXT_LLM_ENABLED")
+        if context_llm_enabled is not None:
+            cfg.context_llm_enabled = context_llm_enabled.lower() in ("1", "true", "yes")
 
         # 情景记忆
         ep_enabled = os.environ.get("NOVARE_EPISODIC_MEMORY_ENABLED")
@@ -217,6 +241,13 @@ class NovareConfig:
         cfg.episodic_memory_min_confidence = max(0.0, min(1.0, cfg.episodic_memory_min_confidence))
         cfg.episodic_memory_min_similarity = max(-1.0, min(1.0, cfg.episodic_memory_min_similarity))
         cfg.episodic_memory_max_per_turn = max(1, min(10, cfg.episodic_memory_max_per_turn))
+
+        # 上下文压缩配置校验
+        cfg.context_max_turns = max(1, min(20, cfg.context_max_turns))
+        cfg.context_token_budget = max(1_000, min(200_000, cfg.context_token_budget))
+        cfg.context_summary_max_tokens = max(300, min(8_000, cfg.context_summary_max_tokens))
+        cfg.context_tool_result_max_tokens = max(200, min(5_000, cfg.context_tool_result_max_tokens))
+        cfg.context_llm_timeout = max(1, min(120, cfg.context_llm_timeout))
 
         # 批量记忆提取配置校验
         cfg.memory_extraction_interval_turns = max(1, min(50, cfg.memory_extraction_interval_turns))

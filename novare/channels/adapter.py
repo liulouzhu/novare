@@ -344,6 +344,7 @@ class AgentAdapter:
                             snapshot_data=deepcopy(session.messages),
                             compacted_through_message_id=last_raw_message_id,
                             estimated_tokens=estimate_messages_tokens(session.messages),
+                            schema_version=_context_snapshot_schema_version(session.messages),
                         )
                         if snapshot is None:
                             raise PermissionError(
@@ -355,3 +356,12 @@ class AgentAdapter:
                     logger.exception("Failed to persist channel session to DB")
         except Exception:
             logger.exception("DB session creation failed")
+
+
+def _context_snapshot_schema_version(messages: list[dict]) -> int:
+    versions = [
+        message.get("_compaction_meta", {}).get("schema_version", 1)
+        for message in messages
+        if message.get("_compaction_meta")
+    ]
+    return max((int(version) for version in versions), default=1)

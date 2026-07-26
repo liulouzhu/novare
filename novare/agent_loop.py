@@ -14,10 +14,10 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Protocol, runtime_checkab
 
 from novare.context_manager import (
     TokenUsage,
-    compact_messages,
     estimate_messages_tokens,
     estimate_tools_tokens,
 )
+from novare.context_compactor import HybridContextCompactor
 from novare.task_state import TaskState, TaskStateManager
 from novare.tool_result import parse_tool_result
 
@@ -54,6 +54,13 @@ class AgentLoop:
         auto_compact_threshold: int = 100_000,
         preserve_recent_messages: int = 4,
         turn_timeout: int = 300,
+        context_max_turns: int = 3,
+        context_token_budget: int = 12_000,
+        context_summary_max_tokens: int = 2_500,
+        context_tool_result_max_tokens: int = 1_200,
+        context_llm_timeout: float = 30.0,
+        context_llm_enabled: bool = True,
+        context_compactor: HybridContextCompactor | None = None,
     ):
         self.llm_client = llm_client
         self.tool_registry: ToolExecutor = tool_registry
@@ -62,6 +69,15 @@ class AgentLoop:
         self.reviewer_llm = reviewer_llm
         self.auto_compact_threshold = auto_compact_threshold
         self.preserve_recent_messages = preserve_recent_messages
+        self.context_compactor = context_compactor or HybridContextCompactor(
+            llm_client,
+            max_turns=context_max_turns,
+            token_budget=context_token_budget,
+            summary_max_tokens=context_summary_max_tokens,
+            tool_result_max_tokens=context_tool_result_max_tokens,
+            llm_timeout=context_llm_timeout,
+            llm_enabled=context_llm_enabled,
+        )
         self.turn_timeout = turn_timeout
 
     async def run_turn(
@@ -276,7 +292,11 @@ class AgentLoop:
             if task_state:
                 system_content += "\n\n" + task_state.to_prompt_block()
             messages.append({"role": "system", "content": system_content})
-        messages.extend(session.messages)
+        allowed_keys = ("role", "content", "name", "tool_calls", "tool_call_id")
+        messages.extend([
+            {key: value for key, value in message.items() if key in allowed_keys}
+            for message in session.messages
+        ])
         return messages
 
     async def _preflight_compact(self, session, messages: list[dict], task_state: TaskState | None = None, system_prompt: str | None = None, autosave: bool = True, on_compact: Callable[[object], Awaitable[None] | None] | None = None) -> bool:
@@ -295,7 +315,9 @@ class AgentLoop:
         tools = self.tool_registry.to_openai_tools()
         estimated = estimate_messages_tokens(messages) + estimate_tools_tokens(tools)
 
-        if estimated < preflight_threshold:
+        if estimated < preflight_threshold and not self.context_compactor.needs_compaction(
+            session.messages
+        ):
             return False
 
         logger.info(
@@ -303,37 +325,27 @@ class AgentLoop:
             estimated, estimate_messages_tokens(messages), estimate_tools_tokens(tools), preflight_threshold,
         )
 
-        compacted, did_compact = compact_messages(
-            session.messages,
-            system_prompt if system_prompt is not None else self.system_prompt,
-            preserve_recent=self.preserve_recent_messages,
+        return await self._compact_session(
+            session,
+            autosave=autosave,
+            on_compact=on_compact,
+            reason="preflight",
         )
-
-        if did_compact:
-            session.messages = compacted
-            session.usage_tracker.reset_after_compact()
-            if autosave:
-                session.save()
-            if on_compact:
-                result = on_compact(session)
-                if asyncio.iscoroutine(result):
-                    await result
-            logger.info("Preflight compaction complete: %d messages remain", len(compacted))
-            return True
-
-        return False
 
     async def _maybe_auto_compact(self, session, system_prompt: str | None = None, autosave: bool = True, on_compact: Callable[[object], Awaitable[None] | None] | None = None) -> bool:
         """检查是否需要自动压缩，如果需要则执行压缩
 
-        借鉴 Claw Code 的 maybe_auto_compact() 策略：
-        当累积 input tokens 超过阈值时，压缩旧消息为摘要。
+        当工作上下文超过轮次/token 预算，或累计 input tokens 超过阈值时，
+        使用规则保护字段 + LLM 结构化摘要的混合策略压缩。
         压缩只修改 session.messages（内存），不影响 PostgreSQL 中的完整历史。
         """
         if self.auto_compact_threshold <= 0:
             return False
 
-        if not session.usage_tracker.should_compact(self.auto_compact_threshold):
+        if (
+            not session.usage_tracker.should_compact(self.auto_compact_threshold)
+            and not self.context_compactor.needs_compaction(session.messages)
+        ):
             return False
 
         # 检查消息数量是否足够压缩
@@ -343,32 +355,52 @@ class AgentLoop:
             session.usage_tracker.cumulative_input, estimated_tokens, len(session.messages),
         )
 
-        # 已经压缩过的消息（带 _compacted 标记）算作已压缩部分
-        # 传入完整 session.messages，compact_messages 内部会处理
-        compacted, did_compact = compact_messages(
-            session.messages,
-            system_prompt if system_prompt is not None else self.system_prompt,
-            preserve_recent=self.preserve_recent_messages,
+        return await self._compact_session(
+            session,
+            autosave=autosave,
+            on_compact=on_compact,
+            reason="post_turn",
         )
 
-        if did_compact:
-            session.messages = compacted
-            # 持久化压缩后的版本
-            if autosave:
-                session.save()
-            if on_compact:
-                result = on_compact(session)
-                if asyncio.iscoroutine(result):
-                    await result
-            # 重置 usage 计数器，避免重复触发
-            session.usage_tracker.reset_after_compact()
-            new_tokens = estimate_messages_tokens(compacted)
-            logger.info(
-                "Compaction complete: %d → %d messages, ~%d tokens saved",
-                len(session.messages) + (len(compacted) - len(session.messages)),
-                len(compacted),
-                estimated_tokens - new_tokens,
-            )
-            return True
+    async def _compact_session(
+        self,
+        session,
+        *,
+        autosave: bool,
+        on_compact: Callable[[object], Awaitable[None] | None] | None,
+        reason: str,
+    ) -> bool:
+        old_count = len(session.messages)
+        old_tokens = estimate_messages_tokens(session.messages)
+        result = await self.context_compactor.compact(session.messages)
+        if not result.did_compact:
+            if result.budget_overflow:
+                logger.warning(
+                    "Context budget overflow cannot be reduced safely: tokens=%d budget=%d",
+                    result.estimated_tokens,
+                    self.context_compactor.token_budget,
+                )
+            return False
 
-        return False
+        session.messages = result.messages
+        session.usage_tracker.reset_after_compact()
+        if autosave:
+            session.save()
+        if on_compact:
+            callback_result = on_compact(session)
+            if asyncio.iscoroutine(callback_result):
+                await callback_result
+        logger.info(
+            "Context compaction complete: reason=%s strategy=%s messages=%d->%d "
+            "tokens=%d->%d turns=%d overflow=%s llm_calls=%d",
+            reason,
+            result.strategy,
+            old_count,
+            len(result.messages),
+            old_tokens,
+            result.estimated_tokens,
+            result.selected_turns,
+            result.budget_overflow,
+            result.llm_calls,
+        )
+        return True

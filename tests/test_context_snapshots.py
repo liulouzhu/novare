@@ -44,7 +44,12 @@ async def test_compaction_appends_raw_messages_and_saves_snapshot(db_session_fac
 
     working = Session(session_id="context-session", workspace=Path("."))
     working.messages = [
-        {"role": "assistant", "content": "summary", "_compacted": True},
+        {
+            "role": "assistant",
+            "content": "summary",
+            "_compacted": True,
+            "_compaction_meta": {"schema_version": 2, "strategy": "hybrid_llm"},
+        },
         {"role": "user", "content": "new raw"},
         {"role": "assistant", "content": "new answer"},
     ]
@@ -67,6 +72,7 @@ async def test_compaction_appends_raw_messages_and_saves_snapshot(db_session_fac
         assert messages[0].id == old_id
         assert snapshot.snapshot_data == working.messages
         assert snapshot.compacted_through_message_id == messages[-1].id
+        assert snapshot.schema_version == 2
 
 
 @pytest.mark.asyncio
