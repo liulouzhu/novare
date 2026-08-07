@@ -292,6 +292,80 @@ class ContextSnapshot(Base):
     user = relationship("User")
 
 
+class RecoveryStateModel(Base):
+    """PR 2：执行恢复状态 — 追踪 tool_call 协议完整性。
+
+    每次 run_turn 创建一个 RecoveryState，记录 tool_call_id 的执行状态、
+    幂等性 key 和动作指纹，支持进程中断后确定性对账。
+    """
+    __tablename__ = "recovery_states"
+    __table_args__ = (
+        UniqueConstraint("session_id", "run_id", name="uq_recovery_state_session_run"),
+        Index("idx_recovery_states_session", "session_id"),
+        Index("idx_recovery_states_run", "run_id"),
+        Index("idx_recovery_states_user", "user_id"),
+        CheckConstraint(
+            "run_status IN ('running', 'completed', 'failed', 'cancelled', 'timed_out', 'interrupted', 'recovered')",
+            name="ck_recovery_state_run_status",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(
+        String(64),
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    run_id = Column(String(32), nullable=False)
+    turn_id = Column(String(32), nullable=False)
+    run_status = Column(String(20), nullable=False, default="running", server_default="running")
+    iteration = Column(Integer, nullable=False, default=0)
+    retry_count = Column(Integer, nullable=False, default=0)
+    recovery_data = Column(JSON_TYPE, nullable=False, default=dict)
+    schema_version = Column(Integer, nullable=False, default=2, server_default="2")
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+    session = relationship("SessionModel")
+    user = relationship("User")
+
+
+class RecoveryEventModel(Base):
+    """PR 2：恢复事件日志 — 支持中断恢复和对账。
+
+    每个工具调用的生命周期事件都被持久化，支持：
+    - 进程中断后恢复
+    - 幂等性检查
+    - 审计追踪
+    """
+    __tablename__ = "recovery_events"
+    __table_args__ = (
+        UniqueConstraint("run_id", "sequence", name="uq_recovery_event_run_sequence"),
+        UniqueConstraint("run_id", "event_key", name="uq_recovery_event_run_key"),
+        Index("idx_recovery_events_run", "run_id"),
+        Index("idx_recovery_events_session", "session_id"),
+        Index("idx_recovery_events_user", "user_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(
+        String(64),
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    run_id = Column(String(32), nullable=False)
+    sequence = Column(Integer, nullable=False)
+    event_key = Column(String(128), nullable=False)  # e.g., "tc1:TOOL_COMPLETED"
+    event_type = Column(String(50), nullable=False)  # e.g., "TOOL_COMPLETED"
+    payload = Column(JSON_TYPE, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    session = relationship("SessionModel")
+    user = relationship("User")
+
+
 class KnowledgeNode(Base):
     __tablename__ = "knowledge_nodes"
 

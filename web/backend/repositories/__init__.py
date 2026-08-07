@@ -7,3 +7,5 @@ from .memory_repo import MemoryRepository
 from .episodic_memory_repo import EpisodicMemoryRepository
 from .context_snapshot_repo import ContextSnapshotRepository
 from .upload_repo import UploadRepository
+from .recovery_state_repo import RecoveryStateRepository
+from .recovery_event_repo import RecoveryEventRepository

@@ -85,6 +85,22 @@ class NovareConfig:
     turn_timeout: int = 300                 # 主 agent 单轮超时（默认 5 分钟）
     subagent_turn_timeout: int = 600        # 子智能体单轮超时（默认 10 分钟）
 
+    # 重试（PR 1：统一错误模型与基础重试机制）
+    llm_retry_attempts: int = 3             # LLM 调用最多尝试次数（含首次）
+    retry_base_delay: float = 0.5           # 指数退避基数（秒）
+    retry_max_delay: float = 8.0            # 指数退避上限（秒）
+    max_retries_per_turn: int = 6           # 每轮 LLM + 工具共享的重试预算
+    retry_after_max_delay: float = 30.0     # 服务端 Retry-After 上限（秒）
+
+    # Reflexion（PR 3：确定性触发 + 结构化策略修订）
+    reflexion_enabled: bool = False          # 主 Agent 默认关闭，开启后行为才变化
+    max_reflections_per_turn: int = 2       # 每轮最多反思次数
+    reflexion_no_progress_threshold: int = 3     # 连续无进展 N 轮触发反思
+    reflexion_repeated_failure_threshold: int = 2  # 相同动作连续失败 N 次触发反思
+    reflexion_timeout: float = 30.0         # 单次反思 LLM 调用超时（秒）
+    reflexion_max_tokens: int = 1200        # 反思输出上限
+    reflexion_max_recent_events: int = 8    # 反思输入最多携带的最近事件数
+
     # 情景记忆（Episodic Memory）
     episodic_memory_enabled: bool = False   # 默认关闭，向后兼容
     episodic_memory_top_k: int = 5          # 检索返回条数
@@ -142,6 +158,46 @@ class NovareConfig:
         sub_turn_timeout = os.environ.get("NOVARE_SUBAGENT_TURN_TIMEOUT")
         if sub_turn_timeout:
             cfg.subagent_turn_timeout = int(sub_turn_timeout)
+
+        # 重试配置（PR 1）
+        llm_retry = os.environ.get("NOVARE_LLM_RETRY_ATTEMPTS")
+        if llm_retry:
+            cfg.llm_retry_attempts = int(llm_retry)
+        retry_base = os.environ.get("NOVARE_RETRY_BASE_DELAY")
+        if retry_base:
+            cfg.retry_base_delay = float(retry_base)
+        retry_max = os.environ.get("NOVARE_RETRY_MAX_DELAY")
+        if retry_max:
+            cfg.retry_max_delay = float(retry_max)
+        max_retries_turn = os.environ.get("NOVARE_MAX_RETRIES_PER_TURN")
+        if max_retries_turn:
+            cfg.max_retries_per_turn = int(max_retries_turn)
+        retry_after_max = os.environ.get("NOVARE_RETRY_AFTER_MAX_DELAY")
+        if retry_after_max:
+            cfg.retry_after_max_delay = float(retry_after_max)
+
+        # Reflexion 配置（PR 3）
+        reflexion_enabled = os.environ.get("NOVARE_REFLEXION_ENABLED")
+        if reflexion_enabled is not None:
+            cfg.reflexion_enabled = reflexion_enabled.lower() in ("1", "true", "yes")
+        max_reflections = os.environ.get("NOVARE_MAX_REFLECTIONS_PER_TURN")
+        if max_reflections:
+            cfg.max_reflections_per_turn = int(max_reflections)
+        refl_np = os.environ.get("NOVARE_REFLECTION_NO_PROGRESS_THRESHOLD")
+        if refl_np:
+            cfg.reflexion_no_progress_threshold = int(refl_np)
+        refl_rf = os.environ.get("NOVARE_REFLECTION_REPEATED_FAILURE_THRESHOLD")
+        if refl_rf:
+            cfg.reflexion_repeated_failure_threshold = int(refl_rf)
+        refl_timeout = os.environ.get("NOVARE_REFLECTION_TIMEOUT")
+        if refl_timeout:
+            cfg.reflexion_timeout = float(refl_timeout)
+        refl_tokens = os.environ.get("NOVARE_REFLECTION_MAX_TOKENS")
+        if refl_tokens:
+            cfg.reflexion_max_tokens = int(refl_tokens)
+        refl_events = os.environ.get("NOVARE_REFLECTION_MAX_RECENT_EVENTS")
+        if refl_events:
+            cfg.reflexion_max_recent_events = int(refl_events)
 
         # 代理
         proxy = os.environ.get("NOVARE_PROXY")
@@ -271,6 +327,21 @@ class NovareConfig:
         cfg.context_summary_max_tokens = max(300, min(8_000, cfg.context_summary_max_tokens))
         cfg.context_tool_result_max_tokens = max(200, min(5_000, cfg.context_tool_result_max_tokens))
         cfg.context_llm_timeout = max(1, min(120, cfg.context_llm_timeout))
+
+        # 重试配置校验（PR 1）
+        cfg.llm_retry_attempts = max(1, min(10, cfg.llm_retry_attempts))
+        cfg.retry_base_delay = max(0.0, min(60.0, cfg.retry_base_delay))
+        cfg.retry_max_delay = max(cfg.retry_base_delay, min(600.0, cfg.retry_max_delay))
+        cfg.max_retries_per_turn = max(0, min(100, cfg.max_retries_per_turn))
+        cfg.retry_after_max_delay = max(1.0, min(600.0, cfg.retry_after_max_delay))
+
+        # Reflexion 配置校验（PR 3）
+        cfg.max_reflections_per_turn = max(1, min(10, cfg.max_reflections_per_turn))
+        cfg.reflexion_no_progress_threshold = max(1, min(20, cfg.reflexion_no_progress_threshold))
+        cfg.reflexion_repeated_failure_threshold = max(1, min(20, cfg.reflexion_repeated_failure_threshold))
+        cfg.reflexion_timeout = max(1.0, min(300.0, cfg.reflexion_timeout))
+        cfg.reflexion_max_tokens = max(100, min(8000, cfg.reflexion_max_tokens))
+        cfg.reflexion_max_recent_events = max(1, min(50, cfg.reflexion_max_recent_events))
 
         # 幻觉检测配置校验
         cfg.hallucination_verifier_max_claims = max(

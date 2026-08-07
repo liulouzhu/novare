@@ -21,6 +21,8 @@ from novare.context_manager import estimate_messages_tokens  # noqa: E402
 from novare.hallucination_verifier import HallucinationVerifier  # noqa: E402
 from novare.llm_client import LLMClient  # noqa: E402
 from novare.mcp_client import McpClient  # noqa: E402
+from novare.recovery.classifier import sanitize_error  # noqa: E402
+from novare.reflexion import ReflexionState  # noqa: E402
 from novare.session import Session  # noqa: E402
 from novare.tools.registry import ToolDef, ToolRegistry  # noqa: E402
 from novare.tool_result import parse_tool_result  # noqa: E402
@@ -30,6 +32,8 @@ from web.backend.db.base import get_session_factory  # noqa: E402
 from web.backend.repositories import (  # noqa: E402
     ContextSnapshotRepository,
     MessageRepository,
+    RecoveryEventRepository,
+    RecoveryStateRepository,
     SessionRepository,
 )
 from web.backend.memory_service import MemoryServiceAsync  # noqa: E402
@@ -43,6 +47,18 @@ logger = logging.getLogger("novare.web")
 
 # 后台任务引用集合，防止 asyncio.create_task 的 task 被 GC 回收
 _background_tasks: set[asyncio.Task] = set()
+
+
+class RecoveryResumeError(Exception):
+    """显式恢复（recovery_run_id）失败：run 不存在 / 不属于当前用户或 session /
+    缺少 reflexion_state / schema 不兼容 / 状态损坏。
+
+    消息统一脱敏，不泄漏 run 是否属于其他用户。
+    """
+
+    def __init__(self, message: str = "无法恢复指定任务，请重新开始或选择有效的运行记录。"):
+        super().__init__(message)
+        self.code = "RECOVERY_RESUME_FAILED"
 
 
 class AgentService:
@@ -174,8 +190,7 @@ class AgentService:
         else:
             self.hallucination_verifier = None
 
-        self.agent = AgentLoop(
-            llm_client=self.llm_client,
+        self.agent = AgentLoop(            llm_client=self.llm_client,
             tool_registry=self.tool_registry,
             system_prompt=self.config.system_prompt,
             reviewer_llm=self.reviewer_llm,
@@ -190,6 +205,18 @@ class AgentService:
             context_llm_enabled=self.config.context_llm_enabled,
             hallucination_verifier=self.hallucination_verifier,
             turn_timeout=self.config.turn_timeout,
+            llm_retry_attempts=self.config.llm_retry_attempts,
+            retry_base_delay=self.config.retry_base_delay,
+            retry_max_delay=self.config.retry_max_delay,
+            max_retries_per_turn=self.config.max_retries_per_turn,
+            retry_after_max_delay=self.config.retry_after_max_delay,
+            reflexion_enabled=self.config.reflexion_enabled,
+            max_reflections_per_turn=self.config.max_reflections_per_turn,
+            reflexion_no_progress_threshold=self.config.reflexion_no_progress_threshold,
+            reflexion_repeated_failure_threshold=self.config.reflexion_repeated_failure_threshold,
+            reflexion_timeout=self.config.reflexion_timeout,
+            reflexion_max_tokens=self.config.reflexion_max_tokens,
+            reflexion_max_recent_events=self.config.reflexion_max_recent_events,
         )
 
         self.subagent_registry = SubagentRegistry()
@@ -252,6 +279,45 @@ class AgentService:
         if user_id:
             return Path(get_user_workspace(user_id))
         return self.config.workspace
+
+    async def _restore_reflexion_state(
+        self, session_id: str, run_id: str, user_id: str,
+    ) -> ReflexionState:
+        """从指定 run 的 recovery_data 恢复 ReflexionState（显式 resume 路径）。
+
+        跨用户 / 跨 session / 跨 run 校验由 RecoveryStateRepository.get_by_run_id
+        完成（按 user_id + session_id + run_id 联合过滤）。
+
+        失败（run 不存在 / 不属于当前 user/session / 缺少 reflexion_state /
+        schema 不兼容 / 状态损坏）时抛 RecoveryResumeError（fail closed），
+        不静默执行新 turn；消息脱敏，不泄漏 run 是否属于其他用户。
+        """
+        try:
+            user_uuid = UUID(user_id)
+            async with get_session_factory()() as db:
+                repo = RecoveryStateRepository(db, user_uuid)
+                model = await repo.get_by_run_id(session_id, run_id)
+                if model is None:
+                    logger.warning("Reflexion resume: run not found (fail closed)")
+                    raise RecoveryResumeError()
+                reflexion_raw = (model.recovery_data or {}).get("reflexion_state")
+                if not reflexion_raw:
+                    raise RecoveryResumeError()
+                state = ReflexionState.from_dict(reflexion_raw)
+                logger.info(
+                    "Reflexion resume: session=%s run=%s forbidden=%d",
+                    session_id, run_id, len(state.forbidden_action_fingerprints),
+                )
+                return state
+        except RecoveryResumeError:
+            raise
+        except Exception as exc:
+            # schema 不兼容 / 状态损坏等 → fail closed，不返回部分污染状态
+            logger.warning(
+                "Reflexion resume failed, rejecting (fail closed): %s",
+                sanitize_error(str(exc))[:300],
+            )
+            raise RecoveryResumeError() from None
 
     async def load_session(self, session_id: str, user_id: str | None = None) -> Session:
         """加载或创建会话。Web 用户（有 user_id）从 DB 加载，否则从 JSONL。"""
@@ -360,8 +426,14 @@ class AgentService:
         user_input: str,
         queue: asyncio.Queue,
         user_id: str | None = None,
+        recovery_run_id: str | None = None,
     ):
-        """执行一轮对话，通过 queue 将事件推送给 WebSocket"""
+        """执行一轮对话，通过 queue 将事件推送给 WebSocket
+
+        recovery_run_id: 显式 resume 入口。提供时从该 run 的 recovery_data
+          恢复 ReflexionState（含 forbidden fingerprints）传给 AgentLoop；
+          不提供时不隐式继承任何历史 run 状态。
+        """
         # ── Redis 并发锁 ──
         lock_key: str | None = None
         lock_token: str | None = None
@@ -450,6 +522,10 @@ class AgentService:
                     "duration": round(duration or 0, 2),
                 })
 
+        # 初始化局部变量（PR 2/3：避免 early exception 时 UnboundLocalError）
+        _recovery_state_data: dict | None = None
+        _reflexion_state_data: dict | None = None
+
         try:
             # ── 构建本轮的 system_prompt（带用户记忆注入）──
             turn_system_prompt = self.config.system_prompt
@@ -494,7 +570,111 @@ class AgentService:
             def on_verification(report: dict):
                 queue.put_nowait({"type": "verification", **report})
 
+            async def on_recovery_state(state_dict: dict):
+                nonlocal _recovery_state_data
+                _recovery_state_data = state_dict
+                queue.put_nowait({"type": "recovery_state", **state_dict})
+                # 增量持久化到 DB（合并 ReflexionState 快照）
+                if user_id:
+                    try:
+                        user_uuid = UUID(user_id)
+                        merged_data = dict(state_dict)
+                        if _reflexion_state_data:
+                            merged_data["reflexion_state"] = _reflexion_state_data
+                        async with get_session_factory()() as db:
+                            recovery_repo = RecoveryStateRepository(db, user_uuid)
+                            await recovery_repo.upsert(
+                                session_id=session.session_id,
+                                run_id=state_dict.get("run_id", ""),
+                                turn_id=state_dict.get("turn_id", ""),
+                                recovery_data=merged_data,
+                                run_status=state_dict.get("run_status", "running"),
+                                iteration=state_dict.get("iteration", 0),
+                                retry_count=state_dict.get("retry_count", 0),
+                                schema_version=state_dict.get("schema_version", 3),
+                            )
+                            await db.commit()
+                    except Exception:
+                        logger.debug("RecoveryState persistence failed (non-fatal)")
+
+            # PR 3：ReflexionState 快照（持久化到 recovery_data.reflexion_state）
+            async def on_reflexion_state(state_dict: dict):
+                nonlocal _reflexion_state_data
+                _reflexion_state_data = state_dict
+                if not user_id:
+                    return
+                try:
+                    user_uuid = UUID(user_id)
+                    async with get_session_factory()() as db:
+                        recovery_repo = RecoveryStateRepository(db, user_uuid)
+                        merged = dict(_recovery_state_data or {})
+                        merged["reflexion_state"] = state_dict
+                        await recovery_repo.upsert(
+                            session_id=session.session_id,
+                            run_id=(_recovery_state_data or {}).get("run_id", ""),
+                            turn_id=(_recovery_state_data or {}).get("turn_id", ""),
+                            recovery_data=merged,
+                            run_status=(_recovery_state_data or {}).get("run_status", "running"),
+                            iteration=(_recovery_state_data or {}).get("iteration", 0),
+                            retry_count=(_recovery_state_data or {}).get("retry_count", 0),
+                            schema_version=(_recovery_state_data or {}).get("schema_version", 3),
+                        )
+                        await db.commit()
+                except Exception:
+                    logger.debug("ReflexionState persistence failed (non-fatal)")
+
             ctx = {"user_id": user_id, "workspace": str(self._workspace_for(user_id))} if user_id else None
+
+            # PR 3：显式 resume 时恢复 ReflexionState（fail closed）
+            restored_reflexion_state: ReflexionState | None = None
+            if recovery_run_id and user_id:
+                try:
+                    restored_reflexion_state = await self._restore_reflexion_state(
+                        session.session_id, recovery_run_id, user_id,
+                    )
+                except RecoveryResumeError as resume_error:
+                    # 恢复失败：fail closed —— 清理任务状态（error）、等待中的状态任务，
+                    # 不调用 AgentLoop、不持久化消息；锁由 finally 释放。
+                    logger.warning("Recovery resume rejected (fail closed)")
+                    if _status_tasks:
+                        await asyncio.gather(*_status_tasks, return_exceptions=True)
+                        _status_tasks.clear()
+                    await self._set_task_status(
+                        task_key=task_key, user_id=user_id or "", session_id=session.session_id,
+                        status="error",
+                        error="无法恢复指定任务，请重新开始或选择有效的运行记录。",
+                        task_started_at=task_started_at, task_ttl=task_ttl,
+                    )
+                    await queue.put({
+                        "type": "error",
+                        "code": resume_error.code,
+                        "message": "无法恢复指定任务，请重新开始或选择有效的运行记录。",
+                    })
+                    return
+
+            # PR 3：Reflexion 事件持久化（event_key 幂等）
+            async def on_reflexion_event(event_type: str, payload: dict):
+                queue.put_nowait({"type": "reflexion_event", "event_type": event_type, **payload})
+                if not user_id:
+                    return
+                try:
+                    user_uuid = UUID(user_id)
+                    run_id = (_recovery_state_data or {}).get("run_id", "") if _recovery_state_data else ""
+                    event_key = payload.get("event_key")
+                    if event_key is None:
+                        event_key = f"refl:{run_id}:{event_type}:{payload.get('trigger_fingerprint', payload.get('reflection_id', 'x'))}"
+                    async with get_session_factory()() as db:
+                        event_repo = RecoveryEventRepository(db, user_uuid)
+                        await event_repo.append(
+                            session_id=session.session_id,
+                            run_id=run_id,
+                            event_type=f"REFLECTION_{event_type}" if not event_type.startswith("REFLECTION_") else event_type,
+                            payload={"event_type": event_type, **payload},
+                            event_key=event_key,
+                        )
+                        await db.commit()
+                except Exception:
+                    logger.debug("Reflexion event persistence failed (non-fatal)")
 
             result = await self.agent.run_turn(
                 session, user_input,
@@ -508,10 +688,25 @@ class AgentService:
                 should_cancel=_check_cancel if cancel_key else None,
                 on_message=_on_message,
                 on_verification=on_verification,
+                on_recovery_state=on_recovery_state,
+                on_reflexion_event=on_reflexion_event,
+                on_reflexion_state=on_reflexion_state,
+                initial_reflexion_state=restored_reflexion_state,
             )
 
+            # ── PR 2：根据 RecoveryState.run_status 标记状态 ──
+            run_status = "done"
+            if _recovery_state_data:
+                rs_status = _recovery_state_data.get("run_status", "running")
+                if rs_status == "cancelled":
+                    run_status = "cancelled"
+                elif rs_status == "timed_out":
+                    run_status = "timeout"
+                elif rs_status in ("failed", "interrupted"):
+                    run_status = "error"
+
             # ── 协作式取消检测 ──
-            if _cancelled:
+            if _cancelled or run_status == "cancelled":
                 if _status_tasks:
                     await asyncio.gather(*_status_tasks, return_exceptions=True)
                     _status_tasks.clear()
@@ -553,7 +748,7 @@ class AgentService:
                 await redis_service.set_json(task_key, {
                     "user_id": user_id or "",
                     "session_id": session.session_id,
-                    "status": "done",
+                    "status": "done" if run_status == "done" else run_status,
                     "started_at": task_started_at,
                     "updated_at": _now,
                     "current_step": "",
@@ -562,6 +757,14 @@ class AgentService:
                 }, ttl=task_ttl)
 
             await queue.put({"type": "done"})
+
+            # ── PR 2：根据 run_status 标记 RecoveryState ──
+            if user_id and _recovery_state_data:
+                run_id = _recovery_state_data.get("run_id", "")
+                if run_status == "done":
+                    await self._mark_recovery_state(user_id, session.session_id, run_id, "completed")
+                elif run_status == "timeout":
+                    await self._mark_recovery_state(user_id, session.session_id, run_id, "timed_out")
 
             # ── 批量记忆提取调度 ──
             if user_id and self.memory_scheduler:
@@ -586,19 +789,20 @@ class AgentService:
             if _status_tasks:
                 await asyncio.gather(*_status_tasks, return_exceptions=True)
                 _status_tasks.clear()
-            if task_key and redis_service.is_available:
-                _now = datetime.now(timezone.utc).isoformat()
-                await redis_service.set_json(task_key, {
-                    "user_id": user_id or "",
-                    "session_id": session.session_id,
-                    "status": "error",
-                    "started_at": task_started_at,
-                    "updated_at": _now,
-                    "current_step": "",
-                    "last_tool": "",
-                    "error": error_msg,
-                }, ttl=task_ttl)
+            await self._set_task_status(
+                task_key=task_key, user_id=user_id or "", session_id=session.session_id,
+                status="error", error=error_msg,
+                task_started_at=task_started_at, task_ttl=task_ttl,
+            )
             await queue.put({"type": "error", "message": error_msg})
+            # ── PR 2：标记 RecoveryState 为失败 ──
+            if user_id and _recovery_state_data:
+                await self._mark_recovery_state(
+                    user_id, session.session_id,
+                    _recovery_state_data.get("run_id", ""),
+                    "failed",
+                    error=error_msg,
+                )
             return ""
         finally:
             if _lock_acquired and lock_key and lock_token:
@@ -606,6 +810,57 @@ class AgentService:
                     await redis_service.delete_if_value(lock_key, lock_token)
                 except Exception:
                     logger.warning("Failed to release Redis lock key=%s", lock_key)
+
+    async def _set_task_status(
+        self,
+        *,
+        task_key: str | None,
+        user_id: str,
+        session_id: str,
+        status: str,
+        error: str | None = None,
+        task_started_at: str = "",
+        task_ttl: int = 3600,
+    ) -> None:
+        """统一更新 Redis task 状态（无 task_key / Redis 不可用时为空操作）。
+
+        普通异常与 RecoveryResumeError 共用，避免状态更新逻辑分叉；
+        error 使用统一、安全消息；updated_at 正确更新。
+        """
+        if not task_key or not redis_service.is_available:
+            return
+        from datetime import datetime, timezone
+        _now = datetime.now(timezone.utc).isoformat()
+        await redis_service.set_json(task_key, {
+            "user_id": user_id or "",
+            "session_id": session_id,
+            "status": status,
+            "started_at": task_started_at,
+            "updated_at": _now,
+            "current_step": "",
+            "last_tool": "",
+            "error": error,
+        }, ttl=task_ttl)
+
+    async def _mark_recovery_state(
+        self,
+        user_id: str,
+        session_id: str,
+        run_id: str,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        """标记 RecoveryState 的终态"""
+        if not run_id:
+            return
+        try:
+            user_uuid = UUID(user_id)
+            async with get_session_factory()() as db:
+                recovery_repo = RecoveryStateRepository(db, user_uuid)
+                await recovery_repo.mark_status(session_id, run_id, status, error)
+                await db.commit()
+        except Exception:
+            logger.debug("RecoveryState status update failed (non-fatal)")
 
     async def persist_web_turn(
         self,

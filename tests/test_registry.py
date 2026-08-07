@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from novare.subagents.tool_executor import SubagentToolExecutor
+from novare.recovery.policy import RetryPolicy
 from novare.tools.registry import ToolRegistry, ToolDef
 from novare.tools.reviewer_evaluate import handle_reviewer_evaluate
 from novare.llm_client import LLMResponse
@@ -26,6 +28,88 @@ class TestToolDef:
         assert openai_tool["type"] == "function"
         assert openai_tool["function"]["name"] == "read_file"
         assert openai_tool["function"]["description"] == "Read a file"
+
+    def test_idempotency_inferred_for_known_read_tool(self):
+        """未指定 idempotency 的已知只读工具推断为 read。"""
+        tool = ToolDef(name="read_file", description="Read", parameters={}, handler=None)
+        assert tool.idempotency == "read"
+        assert tool.retry_policy is not None
+        assert tool.retry_policy.max_attempts == 3
+
+    def test_explicit_non_idempotent_not_overridden(self):
+        """显式 non_idempotent 的已知名称工具绝不能被 __post_init__ 改成 read。"""
+        tool = ToolDef(
+            name="read_file", description="Read", parameters={}, handler=None,
+            idempotency="non_idempotent",
+        )
+        assert tool.idempotency == "non_idempotent"
+
+    def test_explicit_read_preserved(self):
+        tool = ToolDef(name="x", description="d", parameters={}, handler=None, idempotency="read")
+        assert tool.idempotency == "read"
+
+    def test_invalid_idempotency_falls_back_safe(self):
+        """非法 idempotency 值安全回退到 non_idempotent。"""
+        tool = ToolDef(name="x", description="d", parameters={}, handler=None, idempotency="maybe")
+        assert tool.idempotency == "non_idempotent"
+
+    def test_unknown_tool_defaults_conservative(self):
+        """未知工具（名字不在只读集合）默认 non_idempotent、不重试。"""
+        tool = ToolDef(name="code_execute", description="d", parameters={}, handler=None)
+        assert tool.idempotency == "non_idempotent"
+        assert tool.retry_policy is None
+
+    def test_mcp_tool_not_inferred_by_name(self):
+        """MCP 工具不按名字推断：未显式声明时默认 non_idempotent、不重试。"""
+        tool = ToolDef(
+            name="paper_search", description="d", parameters={}, handler=None,
+            source="mcp:research",
+        )
+        assert tool.idempotency == "non_idempotent"
+        assert tool.retry_policy is None
+
+    def test_mcp_tool_explicit_declaration_enables_retry(self):
+        """MCP 工具显式声明 idempotency/retry_policy 后仍可安全重试。"""
+        tool = ToolDef(
+            name="paper_search", description="d", parameters={}, handler=None,
+            source="mcp:research",
+            idempotency="read", retry_policy=RetryPolicy(max_attempts=3),
+        )
+        assert tool.idempotency == "read"
+        assert tool.retry_policy is not None
+        assert tool.retry_policy.max_attempts == 3
+
+    def test_mcp_other_tool_defaults_conservative(self):
+        """其余 MCP 工具默认 non_idempotent、max_attempts=1。"""
+        tool = ToolDef(
+            name="knowledge_graph", description="d", parameters={}, handler=None,
+            source="mcp:research",
+        )
+        assert tool.idempotency == "non_idempotent"
+        assert tool.retry_policy is None
+
+
+class TestSubagentExecutorDelegation:
+    def test_idempotency_delegated_to_parent(self, tmp_workspace):
+        """SubagentToolExecutor 委托父注册表的 idempotency_for。"""
+        registry = ToolRegistry(workspace=tmp_workspace)
+        registry.register_tool(ToolDef(
+            name="read_file", description="r", parameters={},
+            handler=None, idempotency="read",
+        ))
+        executor = SubagentToolExecutor(registry, {"read_file"})
+        assert executor.idempotency_for("read_file") == "read"
+        assert executor.retry_policy_for("read_file") is not None
+
+    def test_idempotency_outside_allowlist_conservative(self, tmp_workspace):
+        """白名单外工具保守返回 non_idempotent。"""
+        registry = ToolRegistry(workspace=tmp_workspace)
+        registry.register_tool(ToolDef(
+            name="reader", description="r", parameters={},
+            handler=None, idempotency="read",
+        ))
+        executor = SubagentToolExecutor(registry, {"other"})
+        assert executor.idempotency_for("reader") == "non_idempotent"
 
 
 class TestToolRegistry:

@@ -181,6 +181,18 @@ async def main():
         context_llm_enabled=config.context_llm_enabled,
         hallucination_verifier=hallucination_verifier,
         turn_timeout=config.turn_timeout,
+        llm_retry_attempts=config.llm_retry_attempts,
+        retry_base_delay=config.retry_base_delay,
+        retry_max_delay=config.retry_max_delay,
+        max_retries_per_turn=config.max_retries_per_turn,
+        retry_after_max_delay=config.retry_after_max_delay,
+        reflexion_enabled=config.reflexion_enabled,
+        max_reflections_per_turn=config.max_reflections_per_turn,
+        reflexion_no_progress_threshold=config.reflexion_no_progress_threshold,
+        reflexion_repeated_failure_threshold=config.reflexion_repeated_failure_threshold,
+        reflexion_timeout=config.reflexion_timeout,
+        reflexion_max_tokens=config.reflexion_max_tokens,
+        reflexion_max_recent_events=config.reflexion_max_recent_events,
     )
 
     # 初始化子智能体系统

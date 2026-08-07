@@ -7,10 +7,46 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Awaitable
 
+from novare.recovery.policy import RetryPolicy
 from novare.tools import file_ops
 from novare.tools.reviewer_evaluate import handle_reviewer_evaluate
 
 logger = logging.getLogger("novare.tools")
+
+# 明确只读、可安全自动重试的工具（最多 3 次尝试）
+_READ_ONLY_RETRYABLE = {"read_file", "glob_search", "grep_search", "paper_search", "rag_query"}
+_READ_ONLY_RETRY_ATTEMPTS = 3
+
+
+_VALID_IDEMPOTENCY = ("read", "idempotent_write", "non_idempotent")
+
+
+def default_retry_policy_for(name: str, source: str = "builtin") -> RetryPolicy | None:
+    """返回工具名的默认重试策略。
+
+    名字推断仅对 builtin 工具生效；MCP / 其他来源的工具必须显式声明
+    （不把工具名作为安全判断，服务器语义未知时保守不重试）。
+    """
+    if source == "builtin" and name in _READ_ONLY_RETRYABLE:
+        return RetryPolicy(max_attempts=_READ_ONLY_RETRY_ATTEMPTS)
+    return None
+
+
+def default_idempotency_for(name: str, source: str = "builtin") -> str:
+    """返回工具名的默认幂等性："read" | "idempotent_write" | "non_idempotent"。
+
+    名字推断仅对 builtin 工具生效；MCP 等外部来源的工具默认 non_idempotent。
+    """
+    if source == "builtin" and name in _READ_ONLY_RETRYABLE:
+        return "read"
+    return "non_idempotent"
+
+
+def _normalize_idempotency(value: str | None) -> str:
+    """规范化幂等性声明：非法值安全回退到 non_idempotent。"""
+    if value in _VALID_IDEMPOTENCY:
+        return value
+    return "non_idempotent"
 
 
 @dataclass
@@ -20,6 +56,20 @@ class ToolDef:
     parameters: dict  # JSON Schema
     handler: Callable[[dict], Awaitable[str]] | None
     source: str = "builtin"  # "builtin" | "mcp:<server_name>"
+    # ── PR 1：重试与幂等性（带默认值，不破坏现有构造调用）──
+    retry_policy: RetryPolicy | None = None      # None → builtin 按名字推断，否则不重试
+    # None 表示“未指定”（由 __post_init__ 推断）；显式传入的 non_idempotent 绝不被覆盖
+    idempotency: str | None = None               # "read" | "idempotent_write" | "non_idempotent"
+    timeout_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.retry_policy is None:
+            self.retry_policy = default_retry_policy_for(self.name, self.source)
+        if self.idempotency is None:
+            # 仅在“未指定”时推断；显式 non_idempotent 保持不变
+            self.idempotency = default_idempotency_for(self.name, self.source)
+        else:
+            self.idempotency = _normalize_idempotency(self.idempotency)
 
     def to_openai_tool(self) -> dict:
         return {
@@ -106,6 +156,8 @@ _BUILTIN_TOOLS: list[dict] = [
             "用独立的评审模型对候选创新点做对抗评审。双模型模式：executor 生成候选，reviewer 独立评估。"
             "需要配置评审模型环境变量。"
         ),
+        "idempotency": "read",          # 纯读操作（调用评审模型），瞬时错误可安全重试
+        "retry_max_attempts": 2,
         "parameters": {
             "type": "object",
             "properties": {
@@ -158,17 +210,38 @@ class ToolRegistry:
         for t in _BUILTIN_TOOLS:
             # reviewer_evaluate 需要 tool_context（包含 reviewer_llm）
             source = "builtin:context" if t["name"] == "reviewer_evaluate" else "builtin"
+            retry_policy = None
+            max_attempts = t.get("retry_max_attempts")
+            if max_attempts is not None:
+                retry_policy = RetryPolicy(max_attempts=int(max_attempts))
             self._tools[t["name"]] = ToolDef(
                 name=t["name"],
                 description=t["description"],
                 parameters=t["parameters"],
                 handler=t["handler"],
                 source=source,
+                retry_policy=retry_policy,
+                # 不显式传 "non_idempotent"：未声明时由 __post_init__ 推断
+                idempotency=t.get("idempotency"),
             )
 
     def register_tool(self, tool: ToolDef):
         self._tools[tool.name] = tool
         logger.info("Registered tool: %s (source=%s)", tool.name, tool.source)
+
+    def get_tool(self, name: str) -> ToolDef | None:
+        """按名字获取工具定义；不存在返回 None。"""
+        return self._tools.get(name)
+
+    def retry_policy_for(self, name: str) -> RetryPolicy | None:
+        """查询工具的重试策略；未注册或未配置返回 None（调用方回退 max_attempts=1）。"""
+        tool = self._tools.get(name)
+        return tool.retry_policy if tool is not None else None
+
+    def idempotency_for(self, name: str) -> str:
+        """查询工具的幂等性；未注册工具保守返回 "non_idempotent"。"""
+        tool = self._tools.get(name)
+        return tool.idempotency if tool is not None else "non_idempotent"
 
     def set_default_tool_context(self, context: dict | None) -> None:
         """设置默认的工具上下文，对 builtin:context 和 mcp 工具自动注入。

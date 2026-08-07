@@ -41,6 +41,18 @@ class SubagentToolExecutor:
         filtered = [t for t in all_tools if t["function"]["name"] in self._allowed]
         return filtered
 
+    def retry_policy_for(self, name: str):
+        """委托查询父注册表的工具重试策略（白名单外返回 None）。"""
+        if name not in self._allowed:
+            return None
+        return self._parent.retry_policy_for(name)
+
+    def idempotency_for(self, name: str) -> str:
+        """委托查询父注册表的工具幂等性（白名单外保守返回 non_idempotent）。"""
+        if name not in self._allowed:
+            return "non_idempotent"
+        return self._parent.idempotency_for(name)
+
     async def execute(
         self, name: str, arguments: dict, tool_context: dict | None = None,
     ) -> str:

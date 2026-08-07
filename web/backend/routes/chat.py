@@ -128,8 +128,31 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
                 user_input = content + refs_text
 
             event_queue: asyncio.Queue = asyncio.Queue()
+
+            # PR 3：显式恢复入口（可选字段 recovery_run_id：非空、限长字符串）
+            recovery_run_id = data.get("recovery_run_id")
+            if recovery_run_id is not None:
+                if (
+                    not isinstance(recovery_run_id, str)
+                    or not recovery_run_id.strip()
+                    or len(recovery_run_id) > 128
+                    or not user_id_str
+                ):
+                    # 无效恢复请求 → fail closed，不执行新 turn
+                    await websocket.send_json({
+                        "type": "error",
+                        "code": "RECOVERY_RESUME_FAILED",
+                        "message": "无法恢复指定任务，请重新开始或选择有效的运行记录。",
+                    })
+                    continue
+                recovery_run_id = recovery_run_id.strip()
+
             current_task = asyncio.create_task(
-                agent_service.run_turn(session, user_input, event_queue, user_id=user_id_str)
+                agent_service.run_turn(
+                    session, user_input, event_queue,
+                    user_id=user_id_str,
+                    recovery_run_id=recovery_run_id,
+                )
             )
 
             try:
