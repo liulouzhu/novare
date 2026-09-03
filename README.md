@@ -90,14 +90,14 @@ JWT_SECRET_KEY=replace-with-a-long-random-string
 
 #### 自进化流程与参数
 
-自进化有两种触发来源：任务失败或停滞时由 Reflexion 归纳修正经验；复杂任务成功后由后台 reviewer 总结可复用工作流。经验经过脱敏后按独立会话聚合，默认至少在 3 个不同会话中形成一致证据，才会成为 `supported` 候选。候选可以生成已有 Skill 的 patch，也可以提议新建 Skill，随后依次经过自动评测、用户批准、应用和回滚。系统不会自动批准或应用 Skill。
+自进化有两种触发来源：任务失败或停滞时由 Reflexion 归纳修正经验；复杂任务成功后由后台 reviewer 总结可复用工作流。经验经过脱敏后按独立会话聚合，默认至少在 3 个不同会话中形成一致证据，才会成为 `supported` 候选。候选可以生成已有 Skill 的 patch，也可以新建 Skill；自动评测通过后默认备份并写入，开启写入审批后则停在草稿状态等待用户批准，所有写入都保留审计、版本归因和回滚能力。
 
 ```text
 失败/停滞 ──> Reflexion ──> ReflectionResolution ──> 失败经验候选 ──┐
                                                                     ├─> Skill patch/create 提议
 复杂任务成功 ──> 后台工作流总结 ──> 成功经验候选 ──────────────────┘
                                                                          │
-                    回滚 <── 应用 <── 用户批准 <── 自动评测门禁 <───────┘
+                    回滚 <── 应用 <──（可选用户批准）<── 自动评测门禁 <──┘
 ```
 
 相关参数可在 `.env` 中配置：
@@ -120,6 +120,8 @@ NOVARE_EVOLUTION_SUCCESS_MAX_TOKENS=1800
 
 # Skill diff、新建 Skill 与自动评测门禁
 NOVARE_EVOLUTION_PROPOSAL_ENABLED=false
+NOVARE_EVOLUTION_AUTO_PROMOTE=true
+NOVARE_EVOLUTION_WRITE_APPROVAL=false
 NOVARE_EVOLUTION_SKILL_MAX_BYTES=15360
 NOVARE_EVOLUTION_PROPOSAL_MAX_TOKENS=4000
 NOVARE_EVOLUTION_EVAL_MAX_TOKENS=3000

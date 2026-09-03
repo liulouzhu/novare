@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import func, select
 
 from novare.evolution.aggregator import build_success_workflow_candidates
+from novare.config import NovareConfig
 from novare.evolution.skill_proposals import SkillFileManager, SkillProposalEvaluator
 from novare.evolution.success_workflows import (
     SuccessfulWorkflowExtractor,
@@ -16,6 +17,7 @@ from novare.llm_client import LLMResponse
 from novare.recovery.state import RecoveryState, RunStatus, ToolCallStatus
 from web.backend.db.models import SessionModel, SuccessfulWorkflowObservationModel, User
 from web.backend.repositories.success_workflow_repo import SuccessfulWorkflowRepository
+from web.backend.agent_service import _workflow_skill_name
 
 
 def _successful_state(tool_count: int = 5) -> RecoveryState:
@@ -169,6 +171,20 @@ def test_success_candidates_require_three_independent_sessions():
     [candidate] = build_success_workflow_candidates(observations)
     assert candidate["support_status"] == "supported"
     assert candidate["suggested_proposal_type"] == "create"
+
+
+def test_auto_promotion_defaults_to_direct_write_and_has_stable_skill_name():
+    config = NovareConfig()
+    assert config.evolution_auto_promote is True
+    assert config.evolution_write_approval is False
+    assert _workflow_skill_name({
+        "workflow_family": "Literature Evidence Synthesis",
+        "workflow_key": "e" * 64,
+    }) == "literature-evidence-synthesis"
+    assert _workflow_skill_name({
+        "workflow_family": "文献综合",
+        "workflow_key": "e" * 64,
+    }) == "workflow-eeeeeeeeeeee"
 
 
 @pytest.mark.asyncio

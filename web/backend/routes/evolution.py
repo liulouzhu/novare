@@ -1,4 +1,4 @@
-"""Read-only endpoints for observation-mode self-evolution evidence."""
+"""Self-evolution observations, proposals, evaluation, writes, and rollback."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from novare.evolution.skill_proposals import (
 )
 from novare.config import get_user_workspace
 from web.backend.auth.dependencies import get_current_user
-from web.backend.db.base import get_db
+from web.backend.db.base import get_db, get_session_factory
 from web.backend.db.models import User
 from web.backend.repositories import (
     EvolutionObservationRepository,
@@ -150,11 +150,13 @@ def _success_observation_out(item) -> dict:
 
 
 def _proposal_out(item, *, include_content: bool = True) -> dict:
+    write_approval_required = bool(item.write_approval_required)
     result = {
         "id": str(item.id),
         "lesson_key": item.lesson_key,
         "candidate_type": item.candidate_type,
         "proposal_type": item.proposal_type,
+        "write_approval_required": write_approval_required,
         "skill_name": item.skill_name,
         "base_content_sha256": item.base_content_sha256,
         "base_version_id": str(item.base_version_id) if item.base_version_id else None,
@@ -176,8 +178,8 @@ def _proposal_out(item, *, include_content: bool = True) -> dict:
         "rolled_back_at": _iso(item.rolled_back_at),
         "created_at": _iso(item.created_at),
         "updated_at": _iso(item.updated_at),
-        "requires_explicit_approval": True,
-        "auto_apply": False,
+        "requires_explicit_approval": write_approval_required,
+        "auto_apply": not write_approval_required,
     }
     if include_content:
         result["unified_diff"] = item.unified_diff
@@ -271,6 +273,36 @@ def _proposal_runtime(user_id: UUID):
     return agent_service, config, manager
 
 
+async def auto_promote_success_candidate(
+    *,
+    user_id: UUID,
+    workflow_key: str,
+    skill_name: str,
+    proposal_type: str,
+) -> dict | None:
+    """Generate/evaluate a supported workflow once; optionally write it."""
+    async with get_session_factory()() as db:
+        repo = SkillProposalRepository(db, user_id)
+        existing = await repo.get_latest_for_candidate(
+            candidate_type="successful_workflow",
+            candidate_key=workflow_key,
+        )
+        if existing is not None:
+            return None
+        user = await db.get(User, user_id)
+        if user is None:
+            return None
+        return await generate_skill_proposal(
+            GenerateSkillProposalRequest(
+                workflow_key=workflow_key,
+                skill_name=skill_name,
+                proposal_type=proposal_type,
+            ),
+            user=user,
+            db=db,
+        )
+
+
 async def _evaluate_proposal(
     *,
     proposal,
@@ -318,6 +350,121 @@ async def _evaluate_proposal(
         )
         await db.commit()
         return await proposal_repo.get_evaluation(proposal.id)
+
+
+async def _apply_proposal_now(
+    *,
+    proposal,
+    proposal_repo: SkillProposalRepository,
+    manager: SkillFileManager,
+    user_id: UUID,
+    db: AsyncSession,
+):
+    """Apply one approved proposal with backup, attribution, and audit."""
+    try:
+        backup = manager.create_backup(
+            proposal_id=str(proposal.id),
+            source_path=Path(proposal.source_path),
+            target_path=Path(proposal.target_path),
+            expected_hash=proposal.base_content_sha256,
+        )
+        await proposal_repo.create_backup(
+            proposal,
+            target_existed=backup.target_existed,
+            content=backup.content,
+            content_sha256=backup.content_sha256,
+            backup_path=str(backup.backup_path),
+        )
+        previous = proposal.status
+        proposal.status = "applying"
+        await proposal_repo.add_audit(
+            proposal.id,
+            action="apply_started",
+            from_status=previous,
+            to_status="applying",
+        )
+        await db.commit()
+
+        applied_hash = manager.apply(
+            target_path=Path(proposal.target_path),
+            skill_name=proposal.skill_name,
+            proposed_content=proposal.proposed_content,
+        )
+        applied_version = await SkillVersionRepository(db, user_id).ensure_version(
+            skill_name=proposal.skill_name,
+            content=proposal.proposed_content,
+            source_kind="proposal",
+            source_path=proposal.target_path,
+            proposal_id=proposal.id,
+            activate=True,
+        )
+        proposal.status = "applied"
+        proposal.applied_content_sha256 = applied_hash
+        proposal.applied_version_id = applied_version.id
+        proposal.applied_at = datetime.now(timezone.utc)
+        await proposal_repo.add_audit(
+            proposal.id,
+            action="applied",
+            from_status="applying",
+            to_status="applied",
+            details={"applied_content_sha256": applied_hash},
+        )
+        await db.commit()
+        await db.refresh(proposal)
+        return proposal
+    except StaleSkillProposalError as exc:
+        previous = proposal.status
+        proposal.status = "stale"
+        await proposal_repo.add_audit(
+            proposal.id,
+            action="apply_rejected_stale",
+            from_status=previous,
+            to_status="stale",
+            details={"error": str(exc)},
+        )
+        await db.commit()
+        raise HTTPException(409, str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        previous = proposal.status
+        proposal.status = "failed"
+        await proposal_repo.add_audit(
+            proposal.id,
+            action="apply_failed",
+            from_status=previous,
+            to_status="failed",
+            details={"error": str(exc)},
+        )
+        await db.commit()
+        raise HTTPException(500, "Skill 应用失败，原文件备份已保留") from exc
+
+
+async def _auto_apply_if_allowed(
+    *,
+    proposal,
+    proposal_repo: SkillProposalRepository,
+    manager: SkillFileManager,
+    user_id: UUID,
+    db: AsyncSession,
+):
+    """Auto-approve and write only when this proposal's policy allows it."""
+    if proposal.gate_status != "passed" or proposal.write_approval_required:
+        return proposal
+    if proposal.status != "draft":
+        return proposal
+    await proposal_repo.approve(
+        proposal,
+        "自动批准：Skill 写入审批未启用，自动评测门禁已通过",
+    )
+    await db.commit()
+    return await _apply_proposal_now(
+        proposal=proposal,
+        proposal_repo=proposal_repo,
+        manager=manager,
+        user_id=user_id,
+        db=db,
+    )
 
 
 @router.get("/resolutions")
@@ -392,6 +539,14 @@ async def observation_summary(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # Reporting must not require proposal mode to be enabled.
+    from web.backend.app import agent_service
+
+    config = agent_service.config
+    proposal_enabled = bool(config and config.evolution_proposal_enabled)
+    write_approval_required = bool(
+        config and config.evolution_write_approval
+    )
     repo = EvolutionObservationRepository(db, user.id)
     resolutions = await repo.list_resolutions(limit=500)
     experiences = [
@@ -414,8 +569,13 @@ async def observation_summary(
     for item in resolutions:
         status_counts[item.status] = status_counts.get(item.status, 0) + 1
     return {
-        "mode": "observe_only",
-        "skill_mutation_enabled": False,
+        "mode": "proposal" if proposal_enabled else "observe_only",
+        "skill_mutation_enabled": proposal_enabled,
+        "auto_promote_enabled": bool(
+            proposal_enabled and config and config.evolution_auto_promote
+        ),
+        "write_approval_required": write_approval_required,
+        "auto_apply_enabled": proposal_enabled and not write_approval_required,
         "resolution_count": len(resolutions),
         "experience_count": len(experiences),
         "candidate_count": len(candidates),
@@ -527,6 +687,7 @@ async def generate_skill_proposal(
         base_version_id=base_version.id if base_version else None,
         candidate_type=candidate_type,
         proposal_type=body.proposal_type,
+        write_approval_required=config.evolution_write_approval,
     )
     await db.commit()
 
@@ -544,16 +705,6 @@ async def generate_skill_proposal(
         )
         await proposal_repo.complete_generation(proposal, generated)
         await db.commit()
-        await _evaluate_proposal(
-            proposal=proposal,
-            proposal_repo=proposal_repo,
-            version_repo=version_repo,
-            agent_service=agent_service,
-            config=config,
-            db=db,
-        )
-        await db.refresh(proposal)
-        return _proposal_out(proposal)
     except Exception as exc:
         safe_error = str(exc) if isinstance(exc, SkillProposalError) else "reviewer 生成失败"
         await proposal_repo.fail_generation(proposal, safe_error)
@@ -562,6 +713,25 @@ async def generate_skill_proposal(
             502,
             {"proposal_id": str(proposal.id), "message": safe_error},
         ) from exc
+
+    await _evaluate_proposal(
+        proposal=proposal,
+        proposal_repo=proposal_repo,
+        version_repo=version_repo,
+        agent_service=agent_service,
+        config=config,
+        db=db,
+    )
+    await db.refresh(proposal)
+    await _auto_apply_if_allowed(
+        proposal=proposal,
+        proposal_repo=proposal_repo,
+        manager=manager,
+        user_id=user.id,
+        db=db,
+    )
+    await db.refresh(proposal)
+    return _proposal_out(proposal)
 
 
 @router.get("/proposals")
@@ -607,7 +777,7 @@ async def evaluate_skill_proposal(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    agent_service, config, _manager = _proposal_runtime(user.id)
+    agent_service, config, manager = _proposal_runtime(user.id)
     proposal_repo = SkillProposalRepository(db, user.id)
     proposal = await proposal_repo.get(proposal_id, for_update=True)
     if proposal is None:
@@ -620,6 +790,14 @@ async def evaluate_skill_proposal(
         version_repo=SkillVersionRepository(db, user.id),
         agent_service=agent_service,
         config=config,
+        db=db,
+    )
+    await db.refresh(proposal)
+    await _auto_apply_if_allowed(
+        proposal=proposal,
+        proposal_repo=proposal_repo,
+        manager=manager,
+        user_id=user.id,
         db=db,
     )
     await db.refresh(proposal)
@@ -694,81 +872,14 @@ async def apply_skill_proposal(
     if proposal.status != "approved":
         raise HTTPException(409, f"提案必须先批准，当前状态为 {proposal.status}")
 
-    try:
-        backup = manager.create_backup(
-            proposal_id=str(proposal.id),
-            source_path=Path(proposal.source_path),
-            target_path=Path(proposal.target_path),
-            expected_hash=proposal.base_content_sha256,
-        )
-        await repo.create_backup(
-            proposal,
-            target_existed=backup.target_existed,
-            content=backup.content,
-            content_sha256=backup.content_sha256,
-            backup_path=str(backup.backup_path),
-        )
-        previous = proposal.status
-        proposal.status = "applying"
-        await repo.add_audit(
-            proposal.id,
-            action="apply_started",
-            from_status=previous,
-            to_status="applying",
-        )
-        await db.commit()
-
-        applied_hash = manager.apply(
-            target_path=Path(proposal.target_path),
-            skill_name=proposal.skill_name,
-            proposed_content=proposal.proposed_content,
-        )
-        applied_version = await SkillVersionRepository(db, user.id).ensure_version(
-            skill_name=proposal.skill_name,
-            content=proposal.proposed_content,
-            source_kind="proposal",
-            source_path=proposal.target_path,
-            proposal_id=proposal.id,
-            activate=True,
-        )
-        proposal.status = "applied"
-        proposal.applied_content_sha256 = applied_hash
-        proposal.applied_version_id = applied_version.id
-        proposal.applied_at = datetime.now(timezone.utc)
-        await repo.add_audit(
-            proposal.id,
-            action="applied",
-            from_status="applying",
-            to_status="applied",
-            details={"applied_content_sha256": applied_hash},
-        )
-        await db.commit()
-        await db.refresh(proposal)
-        return _proposal_out(proposal)
-    except StaleSkillProposalError as exc:
-        previous = proposal.status
-        proposal.status = "stale"
-        await repo.add_audit(
-            proposal.id,
-            action="apply_rejected_stale",
-            from_status=previous,
-            to_status="stale",
-            details={"error": str(exc)},
-        )
-        await db.commit()
-        raise HTTPException(409, str(exc)) from exc
-    except Exception as exc:
-        previous = proposal.status
-        proposal.status = "failed"
-        await repo.add_audit(
-            proposal.id,
-            action="apply_failed",
-            from_status=previous,
-            to_status="failed",
-            details={"error": str(exc)},
-        )
-        await db.commit()
-        raise HTTPException(500, "Skill 应用失败，原文件备份已保留") from exc
+    applied = await _apply_proposal_now(
+        proposal=proposal,
+        proposal_repo=repo,
+        manager=manager,
+        user_id=user.id,
+        db=db,
+    )
+    return _proposal_out(applied)
 
 
 @router.post("/proposals/{proposal_id}/rollback")

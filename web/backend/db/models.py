@@ -561,7 +561,7 @@ class SkillExecutionModel(Base):
 
 
 class SkillProposalModel(Base):
-    """A reviewer-generated Skill change that requires explicit approval."""
+    """A reviewer-generated Skill change with a persisted write policy."""
 
     __tablename__ = "skill_proposals"
     __table_args__ = (
@@ -595,6 +595,7 @@ class SkillProposalModel(Base):
     lesson_key = Column(String(64), nullable=False)
     candidate_type = Column(String(32), nullable=False, default="reflection")
     proposal_type = Column(String(16), nullable=False, default="patch")
+    write_approval_required = Column(Boolean, nullable=False, default=False)
     skill_name = Column(String(80), nullable=False)
     source_path = Column(Text, nullable=False)
     target_path = Column(Text, nullable=False)

@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -21,6 +22,7 @@ from novare.agent_loop import AgentLoop  # noqa: E402
 from novare.config import NovareConfig, get_user_workspace  # noqa: E402
 from novare.context_manager import estimate_messages_tokens  # noqa: E402
 from novare.evolution import SuccessfulWorkflowExtractor  # noqa: E402
+from novare.evolution.aggregator import build_success_workflow_candidates  # noqa: E402
 from novare.hallucination_verifier import HallucinationVerifier  # noqa: E402
 from novare.llm_client import LLMClient  # noqa: E402
 from novare.mcp_client import McpClient  # noqa: E402
@@ -55,6 +57,15 @@ logger = logging.getLogger("novare.web")
 
 # 后台任务引用集合，防止 asyncio.create_task 的 task 被 GC 回收
 _background_tasks: set[asyncio.Task] = set()
+
+
+def _workflow_skill_name(candidate: dict) -> str:
+    """Create a deterministic valid Skill name for a new workflow."""
+    basis = str(candidate.get("workflow_family") or candidate.get("title") or "")
+    slug = re.sub(r"[^a-z0-9]+", "-", basis.lower()).strip("-._")
+    if not slug:
+        slug = f"workflow-{str(candidate.get('workflow_key') or '')[:12]}"
+    return slug[:80].rstrip("-._") or "learned-workflow"
 
 
 class RecoveryResumeError(Exception):
@@ -839,6 +850,7 @@ class AgentService:
                             ensure_ascii=False,
                         ).encode("utf-8")
                     ).hexdigest()
+                    candidate = None
                     async with get_session_factory()() as db:
                         repo = SuccessfulWorkflowRepository(db, UUID(user_id))
                         observation = await repo.upsert_observation(
@@ -850,6 +862,39 @@ class AgentService:
                             environment_fingerprint=environment_fingerprint,
                             min_confidence=self.config.evolution_success_min_confidence,
                         )
+                        observations = await repo.get_by_workflow_key(
+                            observation.workflow_key,
+                        )
+                        reports = build_success_workflow_candidates(
+                            [
+                                {
+                                    "session_id": item.session_id,
+                                    "run_id": item.run_id,
+                                    "workflow_key": item.workflow_key,
+                                    "workflow_family": item.workflow_family,
+                                    "workflow_name": item.workflow_name,
+                                    "summary": item.summary,
+                                    "when_to_use": item.when_to_use,
+                                    "steps": item.steps or [],
+                                    "verification_steps": item.verification_steps or [],
+                                    "existing_skill_match": item.existing_skill_match,
+                                    "reusability": item.reusability,
+                                    "confidence": item.confidence,
+                                    "eligible_for_learning": item.eligible_for_learning,
+                                }
+                                for item in observations
+                            ],
+                            min_independent_sessions=(
+                                self.config.evolution_min_independent_sessions
+                            ),
+                        )
+                        candidate = next(
+                            (
+                                item for item in reports
+                                if item["workflow_key"] == observation.workflow_key
+                            ),
+                            None,
+                        )
                         await db.commit()
                         queue.put_nowait({
                             "type": "successful_workflow_observation",
@@ -859,6 +904,44 @@ class AgentService:
                             "eligible_for_learning": observation.eligible_for_learning,
                             "applied": False,
                         })
+                    if (
+                        candidate
+                        and candidate["support_status"] == "supported"
+                        and self.config.evolution_proposal_enabled
+                        and self.config.evolution_auto_promote
+                    ):
+                        available_names = {item["name"] for item in catalog}
+                        suggested = candidate.get("suggested_existing_skill")
+                        if suggested in available_names:
+                            skill_name = str(suggested)
+                            proposal_type = "patch"
+                        else:
+                            skill_name = _workflow_skill_name(candidate)
+                            proposal_type = (
+                                "patch" if skill_name in available_names else "create"
+                            )
+                        # Delayed import avoids the app/router import cycle.
+                        from web.backend.routes.evolution import (
+                            auto_promote_success_candidate,
+                        )
+
+                        promoted = await auto_promote_success_candidate(
+                            user_id=UUID(user_id),
+                            workflow_key=candidate["workflow_key"],
+                            skill_name=skill_name,
+                            proposal_type=proposal_type,
+                        )
+                        if promoted:
+                            queue.put_nowait({
+                                "type": "skill_proposal_auto_promoted",
+                                "proposal_id": promoted["id"],
+                                "skill_name": promoted["skill_name"],
+                                "status": promoted["status"],
+                                "write_approval_required": promoted[
+                                    "write_approval_required"
+                                ],
+                                "applied": promoted["status"] == "applied",
+                            })
                 except Exception:
                     # Learning is background-only and cannot change task semantics.
                     logger.debug(

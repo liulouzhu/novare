@@ -28,6 +28,7 @@ from web.backend.db.models import (
     User,
 )
 from web.backend.repositories.skill_proposal_repo import SkillProposalRepository
+from web.backend.routes.evolution import _auto_apply_if_allowed, _proposal_out
 
 
 BASE_SKILL = """---
@@ -197,6 +198,7 @@ async def test_repository_records_state_transitions_backup_and_audit(db_session)
         base_content_sha256="b" * 64,
         candidate_snapshot={"support_status": "supported"},
         generated_by_model="reviewer-test",
+        write_approval_required=True,
     )
     generated = GeneratedSkillProposal(
         proposed_content=PROPOSED_SKILL,
@@ -223,6 +225,13 @@ async def test_repository_records_state_transitions_backup_and_audit(db_session)
     await db_session.flush()
 
     assert proposal.status == "approved"
+    assert proposal.write_approval_required is True
+    assert _proposal_out(proposal)["requires_explicit_approval"] is True
+    latest = await repo.get_latest_for_candidate(
+        candidate_type="reflection",
+        candidate_key="a" * 64,
+    )
+    assert latest.id == proposal.id
     assert await db_session.scalar(select(func.count(SkillProposalModel.id))) == 1
     assert await db_session.scalar(select(func.count(SkillProposalBackupModel.id))) == 1
     assert await db_session.scalar(select(func.count(SkillProposalAuditModel.id))) == 4
@@ -233,6 +242,76 @@ async def test_repository_records_state_transitions_backup_and_audit(db_session)
         "approved",
         "backup_created",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("approval_required", "expected_status", "target_exists"),
+    [(False, "applied", True), (True, "draft", False)],
+)
+async def test_write_policy_auto_applies_or_waits_for_approval(
+    db_session,
+    tmp_path,
+    approval_required,
+    expected_status,
+    target_exists,
+):
+    user = User(
+        id=uuid.uuid4(),
+        username=f"write_policy_{uuid.uuid4().hex[:8]}",
+        email=f"write_policy_{uuid.uuid4().hex[:8]}@test.local",
+        password_hash="not-used",
+    )
+    db_session.add(user)
+    await db_session.flush()
+    manager, _global_file, target_file = _manager(tmp_path)
+    location = manager.locate("demo-skill")
+    repo = SkillProposalRepository(db_session, user.id)
+    proposal = await repo.create_generating(
+        lesson_key="d" * 64,
+        skill_name=location.skill_name,
+        source_path=str(location.source_path),
+        target_path=str(location.target_path),
+        base_content_sha256=location.base_content_sha256,
+        candidate_snapshot={"support_status": "supported"},
+        generated_by_model="reviewer-test",
+        write_approval_required=approval_required,
+    )
+    await repo.complete_generation(
+        proposal,
+        GeneratedSkillProposal(
+            proposed_content=PROPOSED_SKILL,
+            unified_diff="--- a\n+++ b\n",
+            summary="summary",
+            rationale="rationale",
+            risk_level="low",
+            test_plan=["test"],
+            eval_cases=[{
+                "name": "narrow query",
+                "input": "narrow evidence query",
+                "expected_behavior": "broaden once",
+            }],
+        ),
+    )
+    proposal.gate_status = "passed"
+    await db_session.commit()
+
+    await _auto_apply_if_allowed(
+        proposal=proposal,
+        proposal_repo=repo,
+        manager=manager,
+        user_id=user.id,
+        db=db_session,
+    )
+
+    assert proposal.status == expected_status
+    assert target_file.exists() is target_exists
+    output = _proposal_out(proposal)
+    assert output["requires_explicit_approval"] is approval_required
+    assert output["auto_apply"] is (not approval_required)
+    if target_exists:
+        assert target_file.read_text(encoding="utf-8") == PROPOSED_SKILL
+        assert await repo.get_backup(proposal.id) is not None
 
 
 @pytest.mark.asyncio

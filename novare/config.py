@@ -100,11 +100,13 @@ class NovareConfig:
     reflexion_max_tokens: int = 1200        # 反思输出上限
     reflexion_max_recent_events: int = 8    # 反思输入最多携带的最近事件数
 
-    # 自进化观察模式（只记录与聚合，不修改 Skill）
+    # 自进化：观察默认只记录；提议模式可自动生成、评测并写入 Skill
     evolution_observe_enabled: bool = False
     evolution_min_confidence: float = 0.6
     evolution_min_independent_sessions: int = 3
     evolution_proposal_enabled: bool = False
+    evolution_auto_promote: bool = True
+    evolution_write_approval: bool = False
     evolution_skill_max_bytes: int = 15_360
     evolution_proposal_max_tokens: int = 4_000
     evolution_eval_max_tokens: int = 3_000
@@ -230,6 +232,12 @@ class NovareConfig:
         evolution_proposals = os.environ.get("NOVARE_EVOLUTION_PROPOSAL_ENABLED")
         if evolution_proposals is not None:
             cfg.evolution_proposal_enabled = evolution_proposals.lower() in ("1", "true", "yes")
+        evolution_auto_promote = os.environ.get("NOVARE_EVOLUTION_AUTO_PROMOTE")
+        if evolution_auto_promote is not None:
+            cfg.evolution_auto_promote = evolution_auto_promote.lower() in ("1", "true", "yes")
+        evolution_write_approval = os.environ.get("NOVARE_EVOLUTION_WRITE_APPROVAL")
+        if evolution_write_approval is not None:
+            cfg.evolution_write_approval = evolution_write_approval.lower() in ("1", "true", "yes")
         evolution_skill_size = os.environ.get("NOVARE_EVOLUTION_SKILL_MAX_BYTES")
         if evolution_skill_size:
             cfg.evolution_skill_max_bytes = int(evolution_skill_size)

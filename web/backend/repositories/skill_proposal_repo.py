@@ -36,6 +36,7 @@ class SkillProposalRepository(BaseRepository):
         base_version_id: UUID | None = None,
         candidate_type: str = "reflection",
         proposal_type: str = "patch",
+        write_approval_required: bool = False,
     ) -> SkillProposalModel:
         proposal = SkillProposalModel(
             user_id=self.user_id,
@@ -45,6 +46,7 @@ class SkillProposalRepository(BaseRepository):
                 else "reflection"
             ),
             proposal_type="create" if proposal_type == "create" else "patch",
+            write_approval_required=bool(write_approval_required),
             skill_name=skill_name[:80],
             source_path=source_path,
             target_path=target_path,
@@ -66,9 +68,25 @@ class SkillProposalRepository(BaseRepository):
                 "skill_name": skill_name[:80],
                 "candidate_type": candidate_type,
                 "proposal_type": proposal_type,
+                "write_approval_required": bool(write_approval_required),
             },
         )
         return proposal
+
+    async def get_latest_for_candidate(
+        self, *, candidate_type: str, candidate_key: str,
+    ) -> SkillProposalModel | None:
+        result = await self.db.execute(
+            select(SkillProposalModel)
+            .where(
+                SkillProposalModel.user_id == self.user_id,
+                SkillProposalModel.candidate_type == candidate_type,
+                SkillProposalModel.lesson_key == candidate_key,
+            )
+            .order_by(SkillProposalModel.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
     async def get(
         self, proposal_id: UUID, *, for_update: bool = False,
