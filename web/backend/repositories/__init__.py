@@ -9,3 +9,7 @@ from .context_snapshot_repo import ContextSnapshotRepository
 from .upload_repo import UploadRepository
 from .recovery_state_repo import RecoveryStateRepository
 from .recovery_event_repo import RecoveryEventRepository
+from .evolution_observation_repo import EvolutionObservationRepository
+from .skill_proposal_repo import SkillProposalRepository
+from .skill_version_repo import SkillVersionRepository
+from .success_workflow_repo import SuccessfulWorkflowRepository

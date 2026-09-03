@@ -46,7 +46,6 @@ class NovareConfig:
 
     # 上下文管理
     auto_compact_threshold: int = 100_000   # 累积 input tokens 超过此值触发自动压缩
-    preserve_recent_messages: int = 4       # 旧版配置兼容；混合压缩不按消息条数裁剪
     context_max_turns: int = 3              # 最多保留的完整用户轮次
     context_token_budget: int = 12_000       # 压缩后工作上下文软预算
     context_summary_max_tokens: int = 2_500  # LLM 结构化摘要输出上限
@@ -100,6 +99,25 @@ class NovareConfig:
     reflexion_timeout: float = 30.0         # 单次反思 LLM 调用超时（秒）
     reflexion_max_tokens: int = 1200        # 反思输出上限
     reflexion_max_recent_events: int = 8    # 反思输入最多携带的最近事件数
+
+    # 自进化观察模式（只记录与聚合，不修改 Skill）
+    evolution_observe_enabled: bool = False
+    evolution_min_confidence: float = 0.6
+    evolution_min_independent_sessions: int = 3
+    evolution_proposal_enabled: bool = False
+    evolution_skill_max_bytes: int = 15_360
+    evolution_proposal_max_tokens: int = 4_000
+    evolution_eval_max_tokens: int = 3_000
+    evolution_eval_min_delta: float = 0.05
+    # Hermes-style learning from successful complex workflows. It is active
+    # only while evolution_observe_enabled is also enabled.
+    evolution_success_enabled: bool = True
+    evolution_success_min_tool_calls: int = 5
+    evolution_success_min_unique_tools: int = 3
+    evolution_success_min_iterations: int = 4
+    evolution_success_require_verification: bool = False
+    evolution_success_min_confidence: float = 0.7
+    evolution_success_max_tokens: int = 1_800
 
     # 情景记忆（Episodic Memory）
     episodic_memory_enabled: bool = False   # 默认关闭，向后兼容
@@ -199,6 +217,53 @@ class NovareConfig:
         if refl_events:
             cfg.reflexion_max_recent_events = int(refl_events)
 
+        # 自进化观察模式
+        evolution_observe = os.environ.get("NOVARE_EVOLUTION_OBSERVE_ENABLED")
+        if evolution_observe is not None:
+            cfg.evolution_observe_enabled = evolution_observe.lower() in ("1", "true", "yes")
+        evolution_confidence = os.environ.get("NOVARE_EVOLUTION_MIN_CONFIDENCE")
+        if evolution_confidence:
+            cfg.evolution_min_confidence = float(evolution_confidence)
+        evolution_sessions = os.environ.get("NOVARE_EVOLUTION_MIN_INDEPENDENT_SESSIONS")
+        if evolution_sessions:
+            cfg.evolution_min_independent_sessions = int(evolution_sessions)
+        evolution_proposals = os.environ.get("NOVARE_EVOLUTION_PROPOSAL_ENABLED")
+        if evolution_proposals is not None:
+            cfg.evolution_proposal_enabled = evolution_proposals.lower() in ("1", "true", "yes")
+        evolution_skill_size = os.environ.get("NOVARE_EVOLUTION_SKILL_MAX_BYTES")
+        if evolution_skill_size:
+            cfg.evolution_skill_max_bytes = int(evolution_skill_size)
+        evolution_proposal_tokens = os.environ.get("NOVARE_EVOLUTION_PROPOSAL_MAX_TOKENS")
+        if evolution_proposal_tokens:
+            cfg.evolution_proposal_max_tokens = int(evolution_proposal_tokens)
+        evolution_eval_tokens = os.environ.get("NOVARE_EVOLUTION_EVAL_MAX_TOKENS")
+        if evolution_eval_tokens:
+            cfg.evolution_eval_max_tokens = int(evolution_eval_tokens)
+        evolution_eval_delta = os.environ.get("NOVARE_EVOLUTION_EVAL_MIN_DELTA")
+        if evolution_eval_delta:
+            cfg.evolution_eval_min_delta = float(evolution_eval_delta)
+        evolution_success = os.environ.get("NOVARE_EVOLUTION_SUCCESS_ENABLED")
+        if evolution_success is not None:
+            cfg.evolution_success_enabled = evolution_success.lower() in ("1", "true", "yes")
+        success_tool_calls = os.environ.get("NOVARE_EVOLUTION_SUCCESS_MIN_TOOL_CALLS")
+        if success_tool_calls:
+            cfg.evolution_success_min_tool_calls = max(1, int(success_tool_calls))
+        success_unique_tools = os.environ.get("NOVARE_EVOLUTION_SUCCESS_MIN_UNIQUE_TOOLS")
+        if success_unique_tools:
+            cfg.evolution_success_min_unique_tools = max(1, int(success_unique_tools))
+        success_iterations = os.environ.get("NOVARE_EVOLUTION_SUCCESS_MIN_ITERATIONS")
+        if success_iterations:
+            cfg.evolution_success_min_iterations = max(1, int(success_iterations))
+        success_verification = os.environ.get("NOVARE_EVOLUTION_SUCCESS_REQUIRE_VERIFICATION")
+        if success_verification is not None:
+            cfg.evolution_success_require_verification = success_verification.lower() in ("1", "true", "yes")
+        success_confidence = os.environ.get("NOVARE_EVOLUTION_SUCCESS_MIN_CONFIDENCE")
+        if success_confidence:
+            cfg.evolution_success_min_confidence = max(0.0, min(1.0, float(success_confidence)))
+        success_tokens = os.environ.get("NOVARE_EVOLUTION_SUCCESS_MAX_TOKENS")
+        if success_tokens:
+            cfg.evolution_success_max_tokens = max(400, int(success_tokens))
+
         # 代理
         proxy = os.environ.get("NOVARE_PROXY")
         if proxy:
@@ -237,9 +302,6 @@ class NovareConfig:
         compact_threshold = os.environ.get("NOVARE_AUTO_COMPACT_THRESHOLD")
         if compact_threshold:
             cfg.auto_compact_threshold = int(compact_threshold)
-        preserve_recent = os.environ.get("NOVARE_PRESERVE_RECENT_MESSAGES")
-        if preserve_recent:
-            cfg.preserve_recent_messages = int(preserve_recent)
         context_max_turns = os.environ.get("NOVARE_CONTEXT_MAX_TURNS")
         if context_max_turns:
             cfg.context_max_turns = int(context_max_turns)
@@ -342,6 +404,16 @@ class NovareConfig:
         cfg.reflexion_timeout = max(1.0, min(300.0, cfg.reflexion_timeout))
         cfg.reflexion_max_tokens = max(100, min(8000, cfg.reflexion_max_tokens))
         cfg.reflexion_max_recent_events = max(1, min(50, cfg.reflexion_max_recent_events))
+        cfg.evolution_min_confidence = max(0.0, min(1.0, cfg.evolution_min_confidence))
+        cfg.evolution_min_independent_sessions = max(
+            2, min(20, cfg.evolution_min_independent_sessions)
+        )
+        cfg.evolution_skill_max_bytes = max(1_024, min(65_536, cfg.evolution_skill_max_bytes))
+        cfg.evolution_proposal_max_tokens = max(
+            500, min(16_000, cfg.evolution_proposal_max_tokens)
+        )
+        cfg.evolution_eval_max_tokens = max(500, min(12_000, cfg.evolution_eval_max_tokens))
+        cfg.evolution_eval_min_delta = max(0.0, min(0.5, cfg.evolution_eval_min_delta))
 
         # 幻觉检测配置校验
         cfg.hallucination_verifier_max_claims = max(

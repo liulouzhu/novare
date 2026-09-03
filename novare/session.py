@@ -44,6 +44,7 @@ class Session:
         self.session_id = session_id or self._generate_id()
         self.workspace = workspace
         self.messages: list[dict] = []
+        self.verification: dict | None = None
         self.usage_tracker = UsageTracker()
         self._dir = workspace / ".novare" / "sessions"
 

@@ -32,7 +32,10 @@ class SubagentStatus(str, Enum):
 # ── 工具白名单映射 ─────────────────────────────────────────────
 
 # 不允许任何子智能体使用的工具（防止递归生成和依赖主智能体上下文）
-_EXCLUDED_TOOLS = {"spawn_subagent", "check_subagent", "list_subagents", "reviewer_evaluate"}
+_EXCLUDED_TOOLS = {
+    "spawn_subagent", "check_subagent", "list_subagents", "reviewer_evaluate",
+    "skills_list", "skill_view",
+}
 
 SUBAGENT_TOOL_ALLOWLISTS: dict[SubagentType, set[str]] = {
     SubagentType.SEARCH: {

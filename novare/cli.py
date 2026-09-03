@@ -12,6 +12,7 @@ from novare.config import NovareConfig, get_user_workspace
 from novare.llm_client import LLMClient
 from novare.session import Session
 from novare.tools.registry import ToolRegistry, ToolDef
+from novare.tools.skills import skill_catalog_prompt
 from novare.mcp_client import McpClient
 from novare.agent_loop import AgentLoop
 from novare.hallucination_verifier import HallucinationVerifier
@@ -132,7 +133,11 @@ async def main():
                 tool_name = tool["name"]
 
                 async def make_handler(c: McpClient, tn: str, uid: str | None):
-                    async def handler(args, workspace=None):
+                    async def handler(args, workspace=None, **_context):
+                        # AgentLoop 会把幂等重试相关的内部上下文（例如
+                        # ``_idempotency_key``、``_action_fingerprint``）作为
+                        # 关键字参数透传给 MCP handler。它们只供 Agent 内部使用，
+                        # 不应混入 MCP 的业务参数；这里吸收并忽略这些上下文。
                         # 注入 _user_id（来自可信 tool context，模型无法覆盖）
                         payload = dict(args)
                         if uid:
@@ -172,7 +177,6 @@ async def main():
         system_prompt=config.system_prompt,
         max_iterations=config.max_iterations,
         auto_compact_threshold=config.auto_compact_threshold,
-        preserve_recent_messages=config.preserve_recent_messages,
         context_max_turns=config.context_max_turns,
         context_token_budget=config.context_token_budget,
         context_summary_max_tokens=config.context_summary_max_tokens,
@@ -215,6 +219,10 @@ async def main():
         skill_dirs.insert(0, user_skill_dir)  # 用户私有优先级最高
     skills = discover_skills(skill_dirs)
     skill_map: dict[str, Skill] = {s.name: s for s in skills}
+    tool_registry.update_default_tool_context({
+        "skill_roots": [str(path) for path in skill_dirs],
+    })
+    agent.system_prompt = config.system_prompt + skill_catalog_prompt(skill_dirs)
 
     # 创建默认 session
     session = Session(workspace=config.workspace)

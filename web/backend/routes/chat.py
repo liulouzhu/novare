@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
@@ -17,9 +18,36 @@ from web.backend.db.base import get_session_factory
 from web.backend.db.models import User
 from web.backend.redis_service import redis_service
 from web.backend.repositories import SessionRepository
+from novare.config import get_user_workspace
+from novare.skill import discover_skills
 
 logger = logging.getLogger("novare.web.chat")
 router = APIRouter()
+
+
+def _resolve_skill_invocation(text: str, *, user_id: str, config):
+    """Resolve `/skill-name arguments` against the user's effective Skill set."""
+    stripped = text.lstrip()
+    if not stripped.startswith("/"):
+        return text, None
+    parts = stripped.split(maxsplit=1)
+    command = parts[0]
+    arguments = parts[1] if len(parts) > 1 else ""
+    skill_name = command[1:]
+    if not skill_name:
+        return text, None
+    user_root = Path(get_user_workspace(user_id)) / ".novare" / "skills"
+    roots = [user_root, *list(config.skill_dirs or [])]
+    skill = next((item for item in discover_skills(roots) if item.name == skill_name), None)
+    if skill is None:
+        return text, None
+    source_content = skill.source.read_text(encoding="utf-8")
+    rendered = skill.render(arguments)
+    return rendered, {
+        "skill_name": skill.name,
+        "content": source_content,
+        "source_path": str(skill.source.resolve()),
+    }
 
 
 @router.websocket("/ws/chat/{session_id}")
@@ -127,6 +155,22 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
                     refs_text += f"- {ref.get('title', ref.get('id', ''))}\n"
                 user_input = content + refs_text
 
+            skill_context = None
+            if agent_service.config is not None:
+                try:
+                    user_input, skill_context = _resolve_skill_invocation(
+                        user_input,
+                        user_id=user_id_str,
+                        config=agent_service.config,
+                    )
+                except OSError:
+                    logger.exception("Failed to load selected Skill")
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "所选 Skill 无法读取，请刷新后重试。",
+                    })
+                    continue
+
             event_queue: asyncio.Queue = asyncio.Queue()
 
             # PR 3：显式恢复入口（可选字段 recovery_run_id：非空、限长字符串）
@@ -147,11 +191,16 @@ async def ws_chat(websocket: WebSocket, session_id: str, token: str = Query(...)
                     continue
                 recovery_run_id = recovery_run_id.strip()
 
+            run_kwargs = {
+                "user_id": user_id_str,
+                "recovery_run_id": recovery_run_id,
+            }
+            if skill_context is not None:
+                run_kwargs["skill_context"] = skill_context
             current_task = asyncio.create_task(
                 agent_service.run_turn(
                     session, user_input, event_queue,
-                    user_id=user_id_str,
-                    recovery_run_id=recovery_run_id,
+                    **run_kwargs,
                 )
             )
 

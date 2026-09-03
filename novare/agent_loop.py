@@ -27,6 +27,10 @@ from novare.context_manager import (
     estimate_tools_tokens,
 )
 from novare.context_compactor import HybridContextCompactor
+from novare.evolution import (
+    ReflectionResolutionTracker,
+    build_successful_workflow_trigger,
+)
 from novare.recovery.classifier import classify_exception, classify_tool_result, sanitize_error
 from novare.recovery.executor import RetryExecutor, retry_tool_call
 from novare.recovery.policy import RetryBudget, RetryPolicy
@@ -160,7 +164,6 @@ class AgentLoop:
         max_iterations: int = 20,
         reviewer_llm: LLMClient | None = None,
         auto_compact_threshold: int = 100_000,
-        preserve_recent_messages: int = 4,
         turn_timeout: int = 300,
         context_max_turns: int = 3,
         context_token_budget: int = 12_000,
@@ -187,6 +190,13 @@ class AgentLoop:
         reflexion_max_tokens: int = 1200,
         reflexion_max_recent_events: int = 8,
         reflexion_sleep: Callable[[float], Awaitable[None]] | None = None,
+        # Observation-only self-evolution. This never writes skills.
+        evolution_observe_enabled: bool = False,
+        evolution_success_enabled: bool = True,
+        evolution_success_min_tool_calls: int = 5,
+        evolution_success_min_unique_tools: int = 3,
+        evolution_success_min_iterations: int = 4,
+        evolution_success_require_verification: bool = False,
     ):
         self.llm_client = llm_client
         self.tool_registry: ToolExecutor = tool_registry
@@ -194,7 +204,6 @@ class AgentLoop:
         self.max_iterations = max_iterations
         self.reviewer_llm = reviewer_llm
         self.auto_compact_threshold = auto_compact_threshold
-        self.preserve_recent_messages = preserve_recent_messages
         self.context_compactor = context_compactor or HybridContextCompactor(
             llm_client,
             max_turns=context_max_turns,
@@ -223,6 +232,12 @@ class AgentLoop:
         self.reflexion_max_tokens = reflexion_max_tokens
         self.reflexion_max_recent_events = reflexion_max_recent_events
         self._reflexion_sleep = reflexion_sleep or asyncio.sleep
+        self.evolution_observe_enabled = evolution_observe_enabled
+        self.evolution_success_enabled = evolution_success_enabled
+        self.evolution_success_min_tool_calls = evolution_success_min_tool_calls
+        self.evolution_success_min_unique_tools = evolution_success_min_unique_tools
+        self.evolution_success_min_iterations = evolution_success_min_iterations
+        self.evolution_success_require_verification = evolution_success_require_verification
 
     async def run_turn(
         self,
@@ -241,7 +256,11 @@ class AgentLoop:
         on_recovery_state: Callable[[dict], Awaitable[None] | None] | None = None,
         on_reflexion_event: Callable[[str, dict], Awaitable[None] | None] | None = None,
         on_reflexion_state: Callable[[dict], Awaitable[None] | None] | None = None,
+        on_reflection_resolution: Callable[[dict], Awaitable[None] | None] | None = None,
         initial_reflexion_state: ReflexionState | None = None,
+        skill_context: dict | None = None,
+        on_skill_execution: Callable[[dict], Awaitable[None] | None] | None = None,
+        on_successful_workflow: Callable[[dict], Awaitable[None] | None] | None = None,
     ) -> str:
         """执行一轮对话，带 per-turn 超时保护。
 
@@ -252,8 +271,13 @@ class AgentLoop:
         on_recovery_state: 可选回调，RecoveryState 变更时推送快照。
         on_reflexion_event: 可选回调，Reflexion 事件（REFLECTION_*/PLAN_REVISED/...）推送。
         initial_reflexion_state: 可选的进程恢复状态（forbidden fingerprints 等）。
+        skill_context: 可选的已登记 Skill 版本元数据，用于精确版本归因。
+        on_skill_execution: 可选回调，本轮结束时发送一次脱敏后的 Skill 执行归因。
+        on_successful_workflow: 复杂成功任务的观察回调，不会修改 Skill。
         超时时返回友好提示，已执行的工具调用和消息保留在 session 中。
         """
+        session.verification = None
+
         # ── PR 2：在 run_turn 外层创建 RecoveryState ──
         # 这样 timeout handler 可以访问 state、session 和 callbacks
         recovery_state = RecoveryState()
@@ -276,6 +300,14 @@ class AgentLoop:
         reflexion_failure_counts: dict[str, int] = {}
         # PR 3：turn 级 forbidden action 阻止计数（跨迭代累计）
         forbidden_blocked_count: list[int] = [0]
+        resolution_tracker = None
+        if self.reflexion_enabled and self.evolution_observe_enabled:
+            resolution_tracker = ReflectionResolutionTracker(
+                session_id=getattr(session, "session_id", ""),
+                run_id=recovery_state.run_id,
+                turn_id=recovery_state.turn_id,
+                user_goal=user_input,
+            )
 
         try:
             return await asyncio.wait_for(
@@ -293,6 +325,7 @@ class AgentLoop:
                     on_reflexion_event=on_reflexion_event,
                     on_reflexion_state=on_reflexion_state,
                     forbidden_blocked_count=forbidden_blocked_count,
+                    reflection_resolution_tracker=resolution_tracker,
                 ),
                 timeout=self.turn_timeout,
             )
@@ -317,6 +350,66 @@ class AgentLoop:
             await terminalize_on_exception(recovery_state, session, e)
             await self._emit_recovery_state(on_recovery_state, recovery_state)
             raise
+        finally:
+            if resolution_tracker is not None:
+                try:
+                    run_status = getattr(recovery_state.run_status, "value", recovery_state.run_status)
+                    resolutions = resolution_tracker.finalize(
+                        run_status=str(run_status),
+                        verification=getattr(session, "verification", None),
+                    )
+                    for resolution in resolutions:
+                        await self._emit_reflection_resolution(
+                            on_reflection_resolution, resolution.to_dict(),
+                        )
+                except Exception:
+                    # Observation is non-critical and must never change turn semantics.
+                    logger.exception("Reflection observation finalization failed")
+            skill_contexts: list[dict] = []
+            if isinstance(skill_context, dict):
+                skill_contexts.append(skill_context)
+            if isinstance(tool_context, dict):
+                loaded = tool_context.get("loaded_skill_versions")
+                if isinstance(loaded, list):
+                    skill_contexts.extend(
+                        item for item in loaded if isinstance(item, dict)
+                    )
+            if self.evolution_observe_enabled and self.evolution_success_enabled:
+                try:
+                    trigger = build_successful_workflow_trigger(
+                        recovery_state=recovery_state,
+                        session_id=getattr(session, "session_id", ""),
+                        user_goal=user_input,
+                        verification=getattr(session, "verification", None),
+                        skill_contexts=skill_contexts,
+                        min_tool_calls=self.evolution_success_min_tool_calls,
+                        min_unique_tools=self.evolution_success_min_unique_tools,
+                        min_iterations=self.evolution_success_min_iterations,
+                        require_verification=self.evolution_success_require_verification,
+                    )
+                    if trigger is not None:
+                        await self._emit_successful_workflow(
+                            on_successful_workflow, trigger.to_dict(),
+                        )
+                except Exception:
+                    logger.exception("Successful workflow observation failed")
+            emitted_versions: set[str] = set()
+            for used_skill in skill_contexts:
+                version_identity = str(used_skill.get("version_id") or "")
+                if not version_identity or version_identity in emitted_versions:
+                    continue
+                emitted_versions.add(version_identity)
+                try:
+                    attribution = self._build_skill_execution_attribution(
+                        skill_context=used_skill,
+                        recovery_state=recovery_state,
+                        verification=getattr(session, "verification", None),
+                        session_id=getattr(session, "session_id", ""),
+                    )
+                    await self._emit_skill_execution(on_skill_execution, attribution)
+                except Exception:
+                    # Attribution is observability data and must not alter the answer.
+                    logger.exception("Skill execution attribution failed")
 
     async def _run_turn_core(
         self,
@@ -343,6 +436,7 @@ class AgentLoop:
         on_reflexion_event: Callable[[str, dict], Awaitable[None] | None] | None = None,
         on_reflexion_state: Callable[[dict], Awaitable[None] | None] | None = None,
         forbidden_blocked_count: list[int] | None = None,
+        reflection_resolution_tracker: ReflectionResolutionTracker | None = None,
     ) -> str:
         """执行一轮对话的核心逻辑：用户输入 → LLM（流式） → 工具循环 → 最终回答"""
         # 当前 turn 使用的 system_prompt
@@ -440,7 +534,7 @@ class AgentLoop:
 
                     session.add_assistant_message(final_content)
                     if verification_report is not None:
-                        session.messages[-1]["_verification"] = verification_report
+                        session.verification = verification_report
                     await self._emit_message(on_message, session.messages[-1])
 
                     recovery_state.set_run_status(RunStatus.COMPLETED)
@@ -670,6 +764,7 @@ class AgentLoop:
                         available_tool_names={
                             t["function"]["name"] for t in tools
                         },
+                        reflection_resolution_tracker=reflection_resolution_tracker,
                     )
                     # ReflexionState 变化后推送快照（供上层持久化 / 进程恢复）
                     await self._emit_reflexion_state(on_reflexion_state, reflexion_state)
@@ -703,6 +798,100 @@ class AgentLoop:
         if callback is None:
             return
         result = callback(dict(report))
+        if asyncio.iscoroutine(result):
+            await result
+
+    @staticmethod
+    async def _emit_reflection_resolution(
+        callback: Callable[[dict], Awaitable[None] | None] | None,
+        resolution: dict,
+    ) -> None:
+        if callback is None:
+            return
+        result = callback(dict(resolution))
+        if asyncio.iscoroutine(result):
+            await result
+
+    @staticmethod
+    def _build_skill_execution_attribution(
+        *,
+        skill_context: dict,
+        recovery_state: RecoveryState,
+        verification: dict | None,
+        session_id: str,
+    ) -> dict:
+        """Build a content-free outcome record for one exact Skill version."""
+        skill_name = str(skill_context.get("skill_name") or "")[:80]
+        version_id = str(skill_context.get("version_id") or "")
+        content_hash = str(skill_context.get("content_sha256") or "")[:64]
+        if not skill_name or not version_id or len(content_hash) != 64:
+            raise ValueError("Incomplete Skill version context")
+
+        run_status = str(getattr(recovery_state.run_status, "value", recovery_state.run_status))
+        verification_data = verification if isinstance(verification, dict) else {}
+        verification_status = str(verification_data.get("status") or "")[:40]
+        risk_score = verification_data.get("risk_score")
+        try:
+            bounded_risk = max(0.0, min(1.0, float(risk_score)))
+        except (TypeError, ValueError):
+            bounded_risk = None
+
+        if run_status == "cancelled":
+            outcome, score = "cancelled", 0.0
+        elif run_status != "completed":
+            outcome, score = "failure", 0.0
+        elif not verification_status:
+            # Completion without an outcome verifier is useful but not proof of quality.
+            outcome, score = "uncertain", 0.5
+        elif verification_status in {"verified", "revised", "verified_with_risk"}:
+            outcome = "success"
+            score = 1.0 - bounded_risk if bounded_risk is not None else 1.0
+        elif verification_status == "repair_failed":
+            outcome, score = "failure", 0.0
+        else:
+            outcome, score = "uncertain", 0.5
+
+        return {
+            "skill_name": skill_name,
+            "version_id": version_id,
+            "content_sha256": content_hash,
+            "session_id": str(session_id or "")[:64] or None,
+            "run_id": recovery_state.run_id,
+            "turn_id": recovery_state.turn_id,
+            "run_status": run_status,
+            "verification_status": verification_status,
+            "outcome": outcome,
+            "score": round(max(0.0, min(1.0, score)), 4),
+            "metrics": {
+                "selection_mode": (
+                    str(skill_context.get("selection_mode") or "explicit")[:20]
+                ),
+                "iterations": recovery_state.iteration,
+                "retry_count": recovery_state.retry_count,
+                "tool_call_count": len(recovery_state.tool_calls),
+                "verification_risk_score": bounded_risk,
+            },
+        }
+
+    @staticmethod
+    async def _emit_skill_execution(
+        callback: Callable[[dict], Awaitable[None] | None] | None,
+        attribution: dict,
+    ) -> None:
+        if callback is None:
+            return
+        result = callback(dict(attribution))
+        if asyncio.iscoroutine(result):
+            await result
+
+    @staticmethod
+    async def _emit_successful_workflow(
+        callback: Callable[[dict], Awaitable[None] | None] | None,
+        trigger: dict,
+    ) -> None:
+        if callback is None:
+            return
+        result = callback(dict(trigger))
         if asyncio.iscoroutine(result):
             await result
 
@@ -931,6 +1120,7 @@ class AgentLoop:
         deadline: float | None,
         iteration: int,
         available_tool_names: set[str],
+        reflection_resolution_tracker: ReflectionResolutionTracker | None = None,
     ) -> None:
         """每个工具 batch 结束后评估并执行一次 Reflexion（最多一次）。
 
@@ -980,6 +1170,15 @@ class AgentLoop:
             reflexion_state.last_progress_fingerprint = progress_tracker.last_progress_fingerprint
             # 同步累计信号回 ReflexionState（供快照持久化 / 跨进程恢复）
             progress_tracker.sync_to_state(reflexion_state)
+
+            # Only reflections committed in earlier iterations can receive this
+            # batch as outcome evidence; a trigger batch cannot validate itself.
+            if reflection_resolution_tracker is not None:
+                reflection_resolution_tracker.observe_batch(
+                    iteration=iteration,
+                    events=batch_events,
+                    made_progress=made_progress,
+                )
 
         # ── 更新连续失败计数（成功清零）──
         self._update_failure_counts(
@@ -1068,6 +1267,13 @@ class AgentLoop:
 
         # 反思成功应用（validated+applied）→ 计划已修订
         if record is not None:
+            if reflection_resolution_tracker is not None:
+                reflection_resolution_tracker.register(
+                    record,
+                    iteration=iteration,
+                    failed_tool=failed_event.tool_name if failed_event else None,
+                    error_code=failed_event.error_code if failed_event else None,
+                )
             await self._emit_reflexion_event(on_reflexion_event, "PLAN_REVISED", {
                 "reflection_id": record.reflection_id,
                 "trigger": record.trigger,

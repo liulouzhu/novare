@@ -16,7 +16,7 @@ from novare.context_manager import UsageTracker, TokenUsage
 from novare.llm_client import LLMResponse, ToolCall
 
 
-def _make_loop(responses: list[LLMResponse], auto_compact_threshold: int = 100_000, preserve_recent: int = 4):
+def _make_loop(responses: list[LLMResponse], auto_compact_threshold: int = 100_000):
     llm = AsyncMock()
     llm.collect_stream = AsyncMock(side_effect=responses)
     llm.close = AsyncMock()
@@ -30,7 +30,6 @@ def _make_loop(responses: list[LLMResponse], auto_compact_threshold: int = 100_0
         tool_registry=registry,
         system_prompt="You are a test assistant.",
         auto_compact_threshold=auto_compact_threshold,
-        preserve_recent_messages=preserve_recent,
         context_llm_enabled=False,
     )
 
@@ -70,7 +69,6 @@ class TestAutosaveFalse:
         loop = _make_loop(
             [LLMResponse(content="ok", tool_calls=[], stop_reason="stop", usage={})],
             auto_compact_threshold=100,
-            preserve_recent=2,
         )
 
         await loop.run_turn(session, "hi", autosave=False)
@@ -105,7 +103,6 @@ class TestAutosaveTrue:
         loop = _make_loop(
             [LLMResponse(content="ok", tool_calls=[], stop_reason="stop", usage={})],
             auto_compact_threshold=100,
-            preserve_recent=2,
         )
 
         await loop.run_turn(session, "hi", autosave=True)
@@ -126,7 +123,6 @@ class TestOnCompactCallback:
         loop = _make_loop(
             [LLMResponse(content="ok", tool_calls=[], stop_reason="stop", usage={})],
             auto_compact_threshold=100,
-            preserve_recent=2,
         )
 
         await loop.run_turn(session, "hi", autosave=False, on_compact=on_compact)
@@ -159,7 +155,6 @@ class TestOnCompactCallback:
         loop = _make_loop(
             [LLMResponse(content="ok", tool_calls=[], stop_reason="stop", usage={})],
             auto_compact_threshold=100,
-            preserve_recent=2,
         )
 
         await loop.run_turn(session, "hi", autosave=False, on_compact=on_compact)
@@ -181,7 +176,6 @@ class TestRawMessageCallback:
                 LLMResponse(content="done", tool_calls=[], stop_reason="stop", usage={}),
             ],
             auto_compact_threshold=100,
-            preserve_recent=2,
         )
         loop.tool_registry.execute = AsyncMock(return_value="tool result")
         captured = []

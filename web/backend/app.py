@@ -18,9 +18,10 @@ if str(PROJECT_ROOT) not in sys.path:
 from dotenv import load_dotenv  # noqa: E402
 load_dotenv(PROJECT_ROOT / ".env")
 
-from fastapi import FastAPI  # noqa: E402
+from fastapi import Depends, FastAPI  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from web.backend.agent_service import AgentService  # noqa: E402
+from web.backend.auth.dependencies import get_current_user  # noqa: E402
 from web.backend.db.base import Base, dispose_engine, get_engine, get_session_factory  # noqa: E402
 from web.backend.redis_service import redis_service  # noqa: E402
 from web.backend.sandbox.manager import (  # noqa: E402
@@ -188,6 +189,7 @@ from web.backend.routes.sessions import router as sessions_router  # noqa: E402
 from web.backend.routes.upload import router as upload_router  # noqa: E402
 from web.backend.routes.memories import router as memories_router  # noqa: E402
 from web.backend.routes.episodic_memories import router as episodic_memories_router  # noqa: E402
+from web.backend.routes.evolution import router as evolution_router  # noqa: E402
 
 app.include_router(auth_router)
 app.include_router(chat_router)
@@ -197,6 +199,7 @@ app.include_router(graph_router)
 app.include_router(upload_router)
 app.include_router(memories_router)
 app.include_router(episodic_memories_router)
+app.include_router(evolution_router)
 
 
 @app.get("/api/health")
@@ -231,13 +234,14 @@ async def health():
 
 
 @app.get("/api/skills")
-async def list_skills():
-    """返回所有可用 skill 列表（从文件系统动态发现）"""
+async def list_skills(user=Depends(get_current_user)):
+    """返回当前用户的有效 Skill 列表（用户版本优先）。"""
+    from novare.config import get_user_workspace
     from novare.skill import discover_skills
 
-    skill_dirs = []
+    skill_dirs = [Path(get_user_workspace(str(user.id))) / ".novare" / "skills"]
     if agent_service.config:
-        skill_dirs = list(agent_service.config.skill_dirs)
+        skill_dirs.extend(agent_service.config.skill_dirs)
 
     skills = discover_skills(skill_dirs)
     return [

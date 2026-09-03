@@ -88,6 +88,56 @@ JWT_SECRET_KEY=replace-with-a-long-random-string
 
 > **URL 格式说明**：传统的 `postgresql://` URL 会在应用内部自动转换为 `postgresql+asyncpg://`。`postgresql+asyncpg://` 格式可直接使用。生产环境必须配置 `DATABASE_URL`，缺少时应用启动会报错。
 
+#### 自进化流程与参数
+
+自进化有两种触发来源：任务失败或停滞时由 Reflexion 归纳修正经验；复杂任务成功后由后台 reviewer 总结可复用工作流。经验经过脱敏后按独立会话聚合，默认至少在 3 个不同会话中形成一致证据，才会成为 `supported` 候选。候选可以生成已有 Skill 的 patch，也可以提议新建 Skill，随后依次经过自动评测、用户批准、应用和回滚。系统不会自动批准或应用 Skill。
+
+```text
+失败/停滞 ──> Reflexion ──> ReflectionResolution ──> 失败经验候选 ──┐
+                                                                    ├─> Skill patch/create 提议
+复杂任务成功 ──> 后台工作流总结 ──> 成功经验候选 ──────────────────┘
+                                                                         │
+                    回滚 <── 应用 <── 用户批准 <── 自动评测门禁 <───────┘
+```
+
+相关参数可在 `.env` 中配置：
+
+```dotenv
+# 失败反思与经验观察
+NOVARE_REFLEXION_ENABLED=false
+NOVARE_EVOLUTION_OBSERVE_ENABLED=false
+NOVARE_EVOLUTION_MIN_CONFIDENCE=0.6
+NOVARE_EVOLUTION_MIN_INDEPENDENT_SESSIONS=3
+
+# 复杂任务成功后的工作流沉淀
+NOVARE_EVOLUTION_SUCCESS_ENABLED=true
+NOVARE_EVOLUTION_SUCCESS_MIN_TOOL_CALLS=5
+NOVARE_EVOLUTION_SUCCESS_MIN_UNIQUE_TOOLS=3
+NOVARE_EVOLUTION_SUCCESS_MIN_ITERATIONS=4
+NOVARE_EVOLUTION_SUCCESS_REQUIRE_VERIFICATION=false
+NOVARE_EVOLUTION_SUCCESS_MIN_CONFIDENCE=0.7
+NOVARE_EVOLUTION_SUCCESS_MAX_TOKENS=1800
+
+# Skill diff、新建 Skill 与自动评测门禁
+NOVARE_EVOLUTION_PROPOSAL_ENABLED=false
+NOVARE_EVOLUTION_SKILL_MAX_BYTES=15360
+NOVARE_EVOLUTION_PROPOSAL_MAX_TOKENS=4000
+NOVARE_EVOLUTION_EVAL_MAX_TOKENS=3000
+NOVARE_EVOLUTION_EVAL_MIN_DELTA=0.05
+
+# 提议模式需要独立 reviewer
+NOVARE_REVIEWER_API_KEY=your-reviewer-api-key
+NOVARE_REVIEWER_BASE_URL=https://your-reviewer-endpoint/v1
+NOVARE_REVIEWER_MODEL=your-reviewer-model
+```
+
+更新后执行数据库迁移：
+
+```powershell
+python -m alembic upgrade head
+```
+
+
 如果要启用论文混合检索与 Qwen3 rerank，再加入以下配置：
 
 ```dotenv

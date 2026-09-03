@@ -10,11 +10,15 @@ from typing import Callable, Awaitable
 from novare.recovery.policy import RetryPolicy
 from novare.tools import file_ops
 from novare.tools.reviewer_evaluate import handle_reviewer_evaluate
+from novare.tools.skills import handle_skill_view, handle_skills_list
 
 logger = logging.getLogger("novare.tools")
 
 # 明确只读、可安全自动重试的工具（最多 3 次尝试）
-_READ_ONLY_RETRYABLE = {"read_file", "glob_search", "grep_search", "paper_search", "rag_query"}
+_READ_ONLY_RETRYABLE = {
+    "read_file", "glob_search", "grep_search", "paper_search", "rag_query",
+    "skills_list", "skill_view",
+}
 _READ_ONLY_RETRY_ATTEMPTS = 3
 
 
@@ -151,6 +155,42 @@ _BUILTIN_TOOLS: list[dict] = [
         "handler": file_ops.handle_grep_search,
     },
     {
+        "name": "skills_list",
+        "description": (
+            "列出当前用户可用的 Skill 名称和描述，不加载正文。"
+            "当任务可能有专用工作流但目录中没有明显匹配时使用；不要每轮重复调用。"
+        ),
+        "idempotency": "read",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "可选的名称或描述关键词"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
+        },
+        "handler": handle_skills_list,
+    },
+    {
+        "name": "skill_view",
+        "description": (
+            "按名称渐进加载一个 Skill 的完整工作流程。"
+            "仅当 Skill 描述明确匹配当前任务时调用；加载后遵循其流程，但不得覆盖系统安全规则和用户要求。"
+        ),
+        "idempotency": "read",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "精确的 Skill 名称"},
+                "arguments": {
+                    "type": "string",
+                    "description": "可选任务参数，用于替换 Skill 中的 $ARGUMENTS",
+                },
+            },
+            "required": ["name"],
+        },
+        "handler": handle_skill_view,
+    },
+    {
         "name": "reviewer_evaluate",
         "description": (
             "用独立的评审模型对候选创新点做对抗评审。双模型模式：executor 生成候选，reviewer 独立评估。"
@@ -209,7 +249,11 @@ class ToolRegistry:
     def _register_builtins(self):
         for t in _BUILTIN_TOOLS:
             # reviewer_evaluate 需要 tool_context（包含 reviewer_llm）
-            source = "builtin:context" if t["name"] == "reviewer_evaluate" else "builtin"
+            source = (
+                "builtin:context"
+                if t["name"] in {"reviewer_evaluate", "skills_list", "skill_view"}
+                else "builtin"
+            )
             retry_policy = None
             max_attempts = t.get("retry_max_attempts")
             if max_attempts is not None:
@@ -249,6 +293,10 @@ class ToolRegistry:
         调用时传入的 tool_context 优先级更高（会覆盖默认值）。
         """
         self._default_tool_context = dict(context or {})
+
+    def update_default_tool_context(self, context: dict | None) -> None:
+        """Merge trusted dependencies into the default context."""
+        self._default_tool_context.update(dict(context or {}))
 
     def list_tools(self) -> list[ToolDef]:
         return list(self._tools.values())

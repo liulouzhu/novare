@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     Column, String, Integer, BigInteger, Text, Boolean, DateTime, Float, LargeBinary,
     ForeignKey, UniqueConstraint, Index, CheckConstraint, JSON,
-    TypeDecorator,
+    TypeDecorator, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB
 from sqlalchemy.orm import relationship
@@ -364,6 +364,336 @@ class RecoveryEventModel(Base):
 
     session = relationship("SessionModel")
     user = relationship("User")
+
+
+class ReflectionResolutionModel(Base):
+    """Observation-only attribution result for one committed reflection."""
+
+    __tablename__ = "reflection_resolutions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "reflection_id", name="uq_resolution_user_reflection"),
+        Index("idx_reflection_resolutions_user_status", "user_id", "status"),
+        Index("idx_reflection_resolutions_run", "run_id"),
+        CheckConstraint(
+            "status IN ('pending', 'helpful', 'ineffective', 'harmful', 'uncertain')",
+            name="ck_reflection_resolution_status",
+        ),
+    )
+
+    id = Column(GUID(), primary_key=True, default=gen_uuid)
+    session_id = Column(
+        String(64), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False,
+    )
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    run_id = Column(String(32), nullable=False)
+    turn_id = Column(String(32), nullable=False)
+    reflection_id = Column(String(64), nullable=False)
+    task_signature = Column(String(64), nullable=False)
+    trigger = Column(String(64), nullable=False)
+    failure_type = Column(String(80), nullable=False, default="")
+    failed_tool = Column(String(128), nullable=False, default="")
+    error_code = Column(String(80), nullable=False, default="")
+    diagnosis = Column(Text, nullable=False, default="")
+    changes = Column(JSON_TYPE, nullable=False, default=list)
+    revised_plan = Column(JSON_TYPE, nullable=False, default=list)
+    suggested_next_action = Column(JSON_TYPE, nullable=True)
+    status = Column(String(20), nullable=False, default="uncertain")
+    confidence = Column(Float, nullable=False, default=0.0)
+    signals = Column(JSON_TYPE, nullable=False, default=dict)
+    evidence_event_ids = Column(JSON_TYPE, nullable=False, default=list)
+    summary = Column(Text, nullable=False, default="")
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class EvolutionExperienceModel(Base):
+    """Sanitized experience derived from a reflection resolution."""
+
+    __tablename__ = "evolution_experiences"
+    __table_args__ = (
+        UniqueConstraint("user_id", "reflection_id", name="uq_experience_user_reflection"),
+        Index("idx_evolution_experiences_lesson", "user_id", "lesson_key"),
+        Index("idx_evolution_experiences_status", "user_id", "resolution_status"),
+    )
+
+    id = Column(GUID(), primary_key=True, default=gen_uuid)
+    reflection_resolution_id = Column(
+        GUID(), ForeignKey("reflection_resolutions.id", ondelete="CASCADE"), nullable=False,
+    )
+    session_id = Column(
+        String(64), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False,
+    )
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    run_id = Column(String(32), nullable=False)
+    reflection_id = Column(String(64), nullable=False)
+    task_signature = Column(String(64), nullable=False)
+    lesson_key = Column(String(64), nullable=False)
+    experience_type = Column(String(40), nullable=False, default="failure_lesson")
+    trigger = Column(String(64), nullable=False)
+    failure_type = Column(String(80), nullable=False, default="")
+    failed_tool = Column(String(128), nullable=False, default="")
+    error_code = Column(String(80), nullable=False, default="")
+    generalized_lesson = Column(Text, nullable=False)
+    resolution_status = Column(String(20), nullable=False)
+    resolution_confidence = Column(Float, nullable=False, default=0.0)
+    evidence_refs = Column(JSON_TYPE, nullable=False, default=list)
+    model_name = Column(String(255), nullable=False, default="")
+    environment_fingerprint = Column(String(64), nullable=False, default="")
+    eligible_for_learning = Column(Boolean, nullable=False, default=False)
+    rejection_reason = Column(String(255), nullable=False, default="")
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class SuccessfulWorkflowObservationModel(Base):
+    """Generalized procedure extracted from one complex successful run."""
+
+    __tablename__ = "successful_workflow_observations"
+    __table_args__ = (
+        UniqueConstraint("user_id", "run_id", name="uq_success_workflow_user_run"),
+        Index("idx_success_workflows_key", "user_id", "workflow_key"),
+        Index("idx_success_workflows_eligible", "user_id", "eligible_for_learning"),
+    )
+
+    id = Column(GUID(), primary_key=True, default=gen_uuid)
+    session_id = Column(
+        String(64), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False,
+    )
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    run_id = Column(String(32), nullable=False)
+    turn_id = Column(String(32), nullable=False)
+    task_signature = Column(String(64), nullable=False)
+    workflow_key = Column(String(64), nullable=False)
+    workflow_family = Column(String(160), nullable=False)
+    workflow_name = Column(String(160), nullable=False)
+    summary = Column(Text, nullable=False, default="")
+    when_to_use = Column(Text, nullable=False, default="")
+    prerequisites = Column(JSON_TYPE, nullable=False, default=list)
+    steps = Column(JSON_TYPE, nullable=False, default=list)
+    decision_points = Column(JSON_TYPE, nullable=False, default=list)
+    pitfalls = Column(JSON_TYPE, nullable=False, default=list)
+    verification_steps = Column(JSON_TYPE, nullable=False, default=list)
+    tool_sequence = Column(JSON_TYPE, nullable=False, default=list)
+    existing_skill_match = Column(String(80), nullable=True)
+    reusability = Column(Float, nullable=False, default=0.0)
+    confidence = Column(Float, nullable=False, default=0.0)
+    complexity_score = Column(Float, nullable=False, default=0.0)
+    verification_status = Column(String(40), nullable=False, default="")
+    metrics = Column(JSON_TYPE, nullable=False, default=dict)
+    model_name = Column(String(255), nullable=False, default="")
+    environment_fingerprint = Column(String(64), nullable=False, default="")
+    eligible_for_learning = Column(Boolean, nullable=False, default=False)
+    rejection_reason = Column(String(255), nullable=False, default="")
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class SkillVersionModel(Base):
+    """Immutable content-addressed version of a user-visible Skill."""
+
+    __tablename__ = "skill_versions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "skill_name", "version", name="uq_skill_version_number"),
+        UniqueConstraint("user_id", "skill_name", "content_sha256", name="uq_skill_version_content"),
+        Index("idx_skill_versions_active", "user_id", "skill_name", "is_active"),
+        Index(
+            "uq_skill_versions_one_active",
+            "user_id", "skill_name",
+            unique=True,
+            postgresql_where=text("is_active"),
+            sqlite_where=text("is_active = 1"),
+        ),
+        CheckConstraint(
+            "source_kind IN ('discovered', 'proposal', 'rollback')",
+            name="ck_skill_version_source_kind",
+        ),
+    )
+
+    id = Column(GUID(), primary_key=True, default=gen_uuid)
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    skill_name = Column(String(80), nullable=False)
+    version = Column(Integer, nullable=False)
+    content_sha256 = Column(String(64), nullable=False)
+    content = Column(Text, nullable=False)
+    source_kind = Column(String(20), nullable=False, default="discovered")
+    source_path = Column(Text, nullable=False, default="")
+    proposal_id = Column(GUID(), ForeignKey("skill_proposals.id"), nullable=True, index=True)
+    parent_version_id = Column(GUID(), ForeignKey("skill_versions.id"), nullable=True)
+    is_active = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class SkillExecutionModel(Base):
+    """One attributed invocation of one exact Skill version."""
+
+    __tablename__ = "skill_executions"
+    __table_args__ = (
+        Index("idx_skill_executions_version", "skill_version_id", "created_at"),
+        Index("idx_skill_executions_user_skill", "user_id", "skill_name", "created_at"),
+        CheckConstraint(
+            "outcome IN ('success', 'failure', 'uncertain', 'cancelled')",
+            name="ck_skill_execution_outcome",
+        ),
+        CheckConstraint(
+            "selection_mode IN ('explicit', 'automatic')",
+            name="ck_skill_execution_selection_mode",
+        ),
+    )
+
+    id = Column(GUID(), primary_key=True, default=gen_uuid)
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    session_id = Column(
+        String(64), ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True,
+    )
+    run_id = Column(String(32), nullable=False, default="")
+    turn_id = Column(String(32), nullable=False, default="")
+    skill_version_id = Column(GUID(), ForeignKey("skill_versions.id"), nullable=False)
+    skill_name = Column(String(80), nullable=False)
+    content_sha256 = Column(String(64), nullable=False)
+    selection_mode = Column(String(20), nullable=False, default="explicit")
+    outcome = Column(String(20), nullable=False, default="uncertain")
+    score = Column(Float, nullable=False, default=0.0)
+    verification_status = Column(String(40), nullable=False, default="")
+    run_status = Column(String(20), nullable=False, default="")
+    metrics = Column(JSON_TYPE, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class SkillProposalModel(Base):
+    """A reviewer-generated Skill change that requires explicit approval."""
+
+    __tablename__ = "skill_proposals"
+    __table_args__ = (
+        Index("idx_skill_proposals_user_status", "user_id", "status"),
+        Index("idx_skill_proposals_lesson", "user_id", "lesson_key"),
+        CheckConstraint(
+            "status IN ('generating', 'draft', 'approved', 'rejected', "
+            "'applying', 'applied', 'stale', 'failed', 'rolled_back')",
+            name="ck_skill_proposal_status",
+        ),
+        CheckConstraint(
+            "risk_level IN ('low', 'medium', 'high', 'unknown')",
+            name="ck_skill_proposal_risk",
+        ),
+        CheckConstraint(
+            "gate_status IN ('pending', 'running', 'passed', 'failed', 'error')",
+            name="ck_skill_proposal_gate_status",
+        ),
+        CheckConstraint(
+            "candidate_type IN ('reflection', 'successful_workflow')",
+            name="ck_skill_proposal_candidate_type",
+        ),
+        CheckConstraint(
+            "proposal_type IN ('patch', 'create')",
+            name="ck_skill_proposal_type",
+        ),
+    )
+
+    id = Column(GUID(), primary_key=True, default=gen_uuid)
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    lesson_key = Column(String(64), nullable=False)
+    candidate_type = Column(String(32), nullable=False, default="reflection")
+    proposal_type = Column(String(16), nullable=False, default="patch")
+    skill_name = Column(String(80), nullable=False)
+    source_path = Column(Text, nullable=False)
+    target_path = Column(Text, nullable=False)
+    base_content_sha256 = Column(String(64), nullable=False)
+    base_version_id = Column(GUID(), ForeignKey("skill_versions.id"), nullable=True)
+    applied_version_id = Column(GUID(), ForeignKey("skill_versions.id"), nullable=True)
+    candidate_snapshot = Column(JSON_TYPE, nullable=False, default=dict)
+    proposed_content = Column(Text, nullable=False, default="")
+    unified_diff = Column(Text, nullable=False, default="")
+    summary = Column(Text, nullable=False, default="")
+    rationale = Column(Text, nullable=False, default="")
+    risk_level = Column(String(20), nullable=False, default="unknown")
+    test_plan = Column(JSON_TYPE, nullable=False, default=list)
+    eval_cases = Column(JSON_TYPE, nullable=False, default=list)
+    gate_status = Column(String(20), nullable=False, default="pending")
+    gate_reason = Column(Text, nullable=False, default="")
+    status = Column(String(20), nullable=False, default="generating")
+    generated_by_model = Column(String(255), nullable=False, default="")
+    generation_error = Column(Text, nullable=False, default="")
+    approval_comment = Column(Text, nullable=False, default="")
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    applied_content_sha256 = Column(String(64), nullable=False, default="")
+    applied_at = Column(DateTime(timezone=True), nullable=True)
+    rolled_back_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class SkillProposalBackupModel(Base):
+    """Immutable pre-application snapshot used for rollback."""
+
+    __tablename__ = "skill_proposal_backups"
+    __table_args__ = (
+        UniqueConstraint("proposal_id", name="uq_skill_proposal_backup_proposal"),
+    )
+
+    id = Column(GUID(), primary_key=True, default=gen_uuid)
+    proposal_id = Column(
+        GUID(), ForeignKey("skill_proposals.id", ondelete="CASCADE"), nullable=False,
+    )
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    target_existed = Column(Boolean, nullable=False, default=False)
+    content = Column(Text, nullable=False)
+    content_sha256 = Column(String(64), nullable=False)
+    backup_path = Column(Text, nullable=False, default="")
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class SkillProposalAuditModel(Base):
+    """Append-only audit trail for every proposal state transition."""
+
+    __tablename__ = "skill_proposal_audits"
+    __table_args__ = (
+        Index("idx_skill_proposal_audits_proposal", "proposal_id", "created_at"),
+        Index("idx_skill_proposal_audits_user", "user_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    proposal_id = Column(
+        GUID(), ForeignKey("skill_proposals.id", ondelete="CASCADE"), nullable=False,
+    )
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    action = Column(String(40), nullable=False)
+    from_status = Column(String(20), nullable=False, default="")
+    to_status = Column(String(20), nullable=False, default="")
+    details = Column(JSON_TYPE, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class SkillEvaluationModel(Base):
+    """Latest automatic evaluation gate result for a Skill proposal."""
+
+    __tablename__ = "skill_evaluations"
+    __table_args__ = (
+        UniqueConstraint("proposal_id", name="uq_skill_evaluation_proposal"),
+        Index("idx_skill_evaluations_user_status", "user_id", "gate_status"),
+        CheckConstraint(
+            "gate_status IN ('pending', 'running', 'passed', 'failed', 'error')",
+            name="ck_skill_evaluation_gate_status",
+        ),
+    )
+
+    id = Column(GUID(), primary_key=True, default=gen_uuid)
+    proposal_id = Column(
+        GUID(), ForeignKey("skill_proposals.id", ondelete="CASCADE"), nullable=False,
+    )
+    user_id = Column(GUID(), ForeignKey("users.id"), nullable=False, index=True)
+    evaluator_model = Column(String(255), nullable=False, default="")
+    gate_status = Column(String(20), nullable=False, default="pending")
+    gate_reason = Column(Text, nullable=False, default="")
+    baseline_score = Column(Float, nullable=False, default=0.0)
+    candidate_score = Column(Float, nullable=False, default=0.0)
+    score_delta = Column(Float, nullable=False, default=0.0)
+    semantic_preservation = Column(Boolean, nullable=False, default=False)
+    safety_pass = Column(Boolean, nullable=False, default=False)
+    regressions = Column(JSON_TYPE, nullable=False, default=list)
+    case_results = Column(JSON_TYPE, nullable=False, default=list)
+    deterministic_checks = Column(JSON_TYPE, nullable=False, default=dict)
+    evaluated_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 class KnowledgeNode(Base):

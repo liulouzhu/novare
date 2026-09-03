@@ -5,6 +5,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from novare.agent_loop import AgentLoop
+from novare.hallucination_verifier import VerificationResult
 from novare.llm_client import LLMResponse, ToolCall
 from novare.tools.registry import ToolRegistry, ToolDef
 
@@ -42,6 +43,38 @@ class TestAgentLoop:
         result = await loop.run_turn(session, "Hi")
         assert result == "Hello!"
         assert len(session.messages) == 2  # user + assistant
+
+    @pytest.mark.asyncio
+    async def test_verification_report_is_turn_state_not_message_metadata(self):
+        async def rag_query(args, workspace=None):
+            return json.dumps({"ok": True, "data": {"results": []}})
+
+        loop = self._make_loop(
+            [
+                LLMResponse(content="", tool_calls=[
+                    ToolCall(id="call_1", name="rag_query", arguments={})
+                ], stop_reason="tool_calls", usage={}),
+                LLMResponse(content="draft", tool_calls=[], stop_reason="stop", usage={}),
+            ],
+            tool_handler={"rag_query": rag_query},
+        )
+        verifier = AsyncMock()
+        verifier.enabled = True
+        verifier.verify = AsyncMock(return_value=VerificationResult(
+            original_answer="draft",
+            corrected_answer="verified",
+            status="revised",
+            did_revise=True,
+        ))
+        loop.hallucination_verifier = verifier
+
+        from novare.session import Session
+        session = Session()
+        result = await loop.run_turn(session, "question")
+
+        assert result == "verified"
+        assert session.verification["status"] == "revised"
+        assert "_verification" not in session.messages[-1]
 
     @pytest.mark.asyncio
     async def test_tool_call_then_response(self):

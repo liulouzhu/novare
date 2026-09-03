@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+import hashlib
+import json
 import logging
 import os
 import sys
@@ -18,23 +20,29 @@ if str(PROJECT_ROOT) not in sys.path:
 from novare.agent_loop import AgentLoop  # noqa: E402
 from novare.config import NovareConfig, get_user_workspace  # noqa: E402
 from novare.context_manager import estimate_messages_tokens  # noqa: E402
+from novare.evolution import SuccessfulWorkflowExtractor  # noqa: E402
 from novare.hallucination_verifier import HallucinationVerifier  # noqa: E402
 from novare.llm_client import LLMClient  # noqa: E402
 from novare.mcp_client import McpClient  # noqa: E402
 from novare.recovery.classifier import sanitize_error  # noqa: E402
 from novare.reflexion import ReflexionState  # noqa: E402
 from novare.session import Session  # noqa: E402
+from novare.skill import discover_skills  # noqa: E402
 from novare.tools.registry import ToolDef, ToolRegistry  # noqa: E402
+from novare.tools.skills import skill_catalog_prompt  # noqa: E402
 from novare.tool_result import parse_tool_result  # noqa: E402
 from novare.subagents.registry import SubagentRegistry  # noqa: E402
 from novare.subagents.tools import register_subagent_tools  # noqa: E402
 from web.backend.db.base import get_session_factory  # noqa: E402
 from web.backend.repositories import (  # noqa: E402
     ContextSnapshotRepository,
+    EvolutionObservationRepository,
     MessageRepository,
     RecoveryEventRepository,
     RecoveryStateRepository,
     SessionRepository,
+    SkillVersionRepository,
+    SuccessfulWorkflowRepository,
 )
 from web.backend.memory_service import MemoryServiceAsync  # noqa: E402
 from web.backend.redis_service import redis_service  # noqa: E402
@@ -196,7 +204,6 @@ class AgentService:
             reviewer_llm=self.reviewer_llm,
             max_iterations=self.config.max_iterations,
             auto_compact_threshold=self.config.auto_compact_threshold,
-            preserve_recent_messages=self.config.preserve_recent_messages,
             context_max_turns=self.config.context_max_turns,
             context_token_budget=self.config.context_token_budget,
             context_summary_max_tokens=self.config.context_summary_max_tokens,
@@ -217,6 +224,12 @@ class AgentService:
             reflexion_timeout=self.config.reflexion_timeout,
             reflexion_max_tokens=self.config.reflexion_max_tokens,
             reflexion_max_recent_events=self.config.reflexion_max_recent_events,
+            evolution_observe_enabled=self.config.evolution_observe_enabled,
+            evolution_success_enabled=self.config.evolution_success_enabled,
+            evolution_success_min_tool_calls=self.config.evolution_success_min_tool_calls,
+            evolution_success_min_unique_tools=self.config.evolution_success_min_unique_tools,
+            evolution_success_min_iterations=self.config.evolution_success_min_iterations,
+            evolution_success_require_verification=self.config.evolution_success_require_verification,
         )
 
         self.subagent_registry = SubagentRegistry()
@@ -427,6 +440,7 @@ class AgentService:
         queue: asyncio.Queue,
         user_id: str | None = None,
         recovery_run_id: str | None = None,
+        skill_context: dict | None = None,
     ):
         """执行一轮对话，通过 queue 将事件推送给 WebSocket
 
@@ -525,8 +539,62 @@ class AgentService:
         # 初始化局部变量（PR 2/3：避免 early exception 时 UnboundLocalError）
         _recovery_state_data: dict | None = None
         _reflexion_state_data: dict | None = None
+        _skill_attribution_context: dict | None = None
+        loaded_skill_versions: list[dict] = []
+        turn_workspace = self._workspace_for(user_id)
+        skill_roots = [turn_workspace / ".novare" / "skills", *self.config.skill_dirs]
+
+        async def register_skill_version(
+            *,
+            skill_name: str,
+            content: str,
+            source_path: str,
+            selection_mode: str,
+        ) -> dict:
+            if not user_id:
+                raise RuntimeError("Skill 版本归因需要已登录用户")
+            mode = "automatic" if selection_mode == "automatic" else "explicit"
+            async with get_session_factory()() as db:
+                version_repo = SkillVersionRepository(db, UUID(user_id))
+                version = await version_repo.ensure_version(
+                    skill_name=skill_name,
+                    content=content,
+                    source_kind="discovered",
+                    source_path=source_path,
+                    activate=True,
+                )
+                await db.commit()
+                attribution = {
+                    "skill_name": version.skill_name,
+                    "version_id": str(version.id),
+                    "content_sha256": version.content_sha256,
+                    "selection_mode": mode,
+                }
+            queue.put_nowait({"type": "skill_version", **attribution})
+            return attribution
 
         try:
+            # Register the immutable Skill content before execution so every
+            # attributed run points to a version that already exists.
+            if skill_context is not None:
+                if not user_id:
+                    raise RuntimeError("Skill 版本归因需要已登录用户")
+                skill_name = str(skill_context.get("skill_name") or "").strip()
+                skill_content = skill_context.get("content")
+                source_path = str(skill_context.get("source_path") or "")
+                if not skill_name or not isinstance(skill_content, str) or not skill_content.strip():
+                    raise RuntimeError("Skill 版本信息不完整，已停止执行")
+                try:
+                    _skill_attribution_context = await register_skill_version(
+                        skill_name=skill_name,
+                        content=skill_content,
+                        source_path=source_path,
+                        selection_mode="explicit",
+                    )
+                except Exception as exc:
+                    logger.exception("Skill version registration failed")
+                    raise RuntimeError("Skill 版本登记失败，已停止执行") from exc
+
             # ── 构建本轮的 system_prompt（带用户记忆注入）──
             turn_system_prompt = self.config.system_prompt
             if user_id and self.memory_service:
@@ -553,6 +621,16 @@ class AgentService:
                         turn_system_prompt += "\n\n" + episodic_prompt
                 except Exception:
                     logger.debug("Episodic memory retrieval failed (non-fatal)")
+
+            # Progressive disclosure: only compact metadata enters the prompt;
+            # full Skill instructions require an explicit skill_view tool call.
+            turn_system_prompt += skill_catalog_prompt(skill_roots)
+            if _skill_attribution_context is not None:
+                turn_system_prompt += (
+                    "\n本轮用户已经显式加载 Skill `"
+                    + _skill_attribution_context["skill_name"]
+                    + "`，不要再次调用 skill_view 加载同一个 Skill。"
+                )
 
             compacted = False
             raw_turn_messages: list[dict] = []
@@ -623,7 +701,13 @@ class AgentService:
                 except Exception:
                     logger.debug("ReflexionState persistence failed (non-fatal)")
 
-            ctx = {"user_id": user_id, "workspace": str(self._workspace_for(user_id))} if user_id else None
+            ctx = {
+                "user_id": user_id,
+                "workspace": str(turn_workspace),
+                "skill_roots": [str(path) for path in skill_roots],
+                "register_skill_version": register_skill_version,
+                "loaded_skill_versions": loaded_skill_versions,
+            } if user_id else None
 
             # PR 3：显式 resume 时恢复 ReflexionState（fail closed）
             restored_reflexion_state: ReflexionState | None = None
@@ -676,6 +760,161 @@ class AgentService:
                 except Exception:
                     logger.debug("Reflexion event persistence failed (non-fatal)")
 
+            async def _persist_reflection_resolution(resolution: dict) -> None:
+                if not user_id or not self.config:
+                    return
+                try:
+                    tool_manifest = [
+                        {"name": tool.name, "source": tool.source}
+                        for tool in (self.tool_registry.list_tools() if self.tool_registry else [])
+                    ]
+                    tool_manifest.sort(key=lambda item: (item["name"], item["source"]))
+                    environment_fingerprint = hashlib.sha256(
+                        json.dumps(
+                            {"model": self.config.model, "tools": tool_manifest},
+                            sort_keys=True,
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    async with get_session_factory()() as db:
+                        repo = EvolutionObservationRepository(db, UUID(user_id))
+                        await repo.upsert_observation(
+                            resolution,
+                            model_name=self.config.model,
+                            environment_fingerprint=environment_fingerprint,
+                            min_confidence=self.config.evolution_min_confidence,
+                        )
+                        await db.commit()
+                except Exception:
+                    logger.debug("ReflectionResolution persistence failed (non-fatal)", exc_info=True)
+
+            def on_reflection_resolution(resolution: dict) -> None:
+                # This is an observation event only. Persistence is deliberately
+                # detached so it cannot delay or alter the user-facing turn.
+                safe_resolution = dict(resolution)
+                for field in ("diagnosis", "summary"):
+                    safe_resolution[field] = sanitize_error(str(safe_resolution.get(field) or ""))
+                for field in ("changes", "revised_plan"):
+                    safe_resolution[field] = [
+                        sanitize_error(str(item))
+                        for item in (safe_resolution.get(field) or [])[:20]
+                    ]
+                suggestion = safe_resolution.get("suggested_next_action")
+                if isinstance(suggestion, dict):
+                    arguments = suggestion.get("arguments")
+                    safe_resolution["suggested_next_action"] = {
+                        "tool": str(suggestion.get("tool") or "")[:128],
+                        "argument_names": sorted(
+                            str(key)[:80] for key in arguments
+                        )[:30] if isinstance(arguments, dict) else [],
+                    }
+                queue.put_nowait({"type": "reflection_resolution", **safe_resolution})
+                task = asyncio.create_task(_persist_reflection_resolution(safe_resolution))
+                _background_tasks.add(task)
+                task.add_done_callback(_background_tasks.discard)
+
+            async def _extract_and_persist_successful_workflow(trigger: dict) -> None:
+                if not user_id or not self.config:
+                    return
+                try:
+                    reviewer = self.reviewer_llm or self.llm_client
+                    extractor = SuccessfulWorkflowExtractor(
+                        reviewer,
+                        max_tokens=self.config.evolution_success_max_tokens,
+                    )
+                    catalog = [
+                        {"name": item.name, "description": item.description}
+                        for item in discover_skills(skill_roots)
+                    ]
+                    extracted = await extractor.extract(trigger, skill_catalog=catalog)
+                    tool_manifest = [
+                        {"name": tool.name, "source": tool.source}
+                        for tool in (self.tool_registry.list_tools() if self.tool_registry else [])
+                    ]
+                    tool_manifest.sort(key=lambda item: (item["name"], item["source"]))
+                    environment_fingerprint = hashlib.sha256(
+                        json.dumps(
+                            {"model": self.config.model, "tools": tool_manifest},
+                            sort_keys=True,
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    async with get_session_factory()() as db:
+                        repo = SuccessfulWorkflowRepository(db, UUID(user_id))
+                        observation = await repo.upsert_observation(
+                            trigger,
+                            extracted,
+                            model_name=(
+                                self.config.reviewer_model or self.config.model
+                            ),
+                            environment_fingerprint=environment_fingerprint,
+                            min_confidence=self.config.evolution_success_min_confidence,
+                        )
+                        await db.commit()
+                        queue.put_nowait({
+                            "type": "successful_workflow_observation",
+                            "id": str(observation.id),
+                            "workflow_key": observation.workflow_key,
+                            "workflow_name": observation.workflow_name,
+                            "eligible_for_learning": observation.eligible_for_learning,
+                            "applied": False,
+                        })
+                except Exception:
+                    # Learning is background-only and cannot change task semantics.
+                    logger.debug(
+                        "Successful workflow extraction failed (non-fatal)",
+                        exc_info=True,
+                    )
+
+            def on_successful_workflow(trigger: dict) -> None:
+                # The user goal is only passed transiently to the reviewer; never
+                # publish it in observability events or persist it in the database.
+                queue.put_nowait({
+                    "type": "successful_workflow_triggered",
+                    "run_id": str(trigger.get("run_id") or "")[:32],
+                    "complexity_score": trigger.get("complexity_score"),
+                    "metrics": trigger.get("metrics") or {},
+                    "applied": False,
+                })
+                task = asyncio.create_task(
+                    _extract_and_persist_successful_workflow(dict(trigger))
+                )
+                _background_tasks.add(task)
+                task.add_done_callback(_background_tasks.discard)
+
+            async def on_skill_execution(attribution: dict) -> None:
+                """Persist exact-version attribution without storing Skill text."""
+                if not user_id:
+                    return
+                try:
+                    async with get_session_factory()() as db:
+                        version_repo = SkillVersionRepository(db, UUID(user_id))
+                        execution = await version_repo.record_execution(
+                            version_id=UUID(str(attribution["version_id"])),
+                            session_id=attribution.get("session_id"),
+                            run_id=str(attribution.get("run_id") or ""),
+                            turn_id=str(attribution.get("turn_id") or ""),
+                            selection_mode=str(
+                                (attribution.get("metrics") or {}).get("selection_mode")
+                                or "explicit"
+                            ),
+                            outcome=str(attribution.get("outcome") or "uncertain"),
+                            score=float(attribution.get("score") or 0.0),
+                            verification_status=str(attribution.get("verification_status") or ""),
+                            run_status=str(attribution.get("run_status") or ""),
+                            metrics=attribution.get("metrics") or {},
+                        )
+                        await db.commit()
+                        queue.put_nowait({
+                            "type": "skill_execution",
+                            "id": str(execution.id),
+                            **attribution,
+                        })
+                except Exception:
+                    # Attribution failure is observable in logs but never rewrites
+                    # or suppresses the already-produced user answer.
+                    logger.exception("Skill execution persistence failed")
+
             result = await self.agent.run_turn(
                 session, user_input,
                 on_text=on_text,
@@ -691,7 +930,11 @@ class AgentService:
                 on_recovery_state=on_recovery_state,
                 on_reflexion_event=on_reflexion_event,
                 on_reflexion_state=on_reflexion_state,
+                on_reflection_resolution=on_reflection_resolution,
                 initial_reflexion_state=restored_reflexion_state,
+                skill_context=_skill_attribution_context,
+                on_skill_execution=on_skill_execution,
+                on_successful_workflow=on_successful_workflow,
             )
 
             # ── PR 2：根据 RecoveryState.run_status 标记状态 ──
